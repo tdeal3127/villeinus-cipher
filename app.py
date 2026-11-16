@@ -268,10 +268,14 @@ def parse_price_list(raw_text: str) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# Restricted Underground Vault PIN Gate (PIN: 3127)
+# Restricted Underground Vault PIN Gate (PIN: 3127 or Token Handoff)
 # ---------------------------------------------------------------------------
 if "vault_unlocked" not in st.session_state:
     st.session_state.vault_unlocked = False
+
+if st.query_params.get("vault") == "viu5aba":
+    st.session_state.vault_unlocked = True
+    st.query_params.clear()
 
 if not st.session_state.vault_unlocked:
     _, col_gate, _ = st.columns([1, 1.3, 1])
