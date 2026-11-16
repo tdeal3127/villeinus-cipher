@@ -327,14 +327,26 @@ with st.sidebar:
     st.divider()
 
     st.subheader("1. Margin Control")
+    if "target_roi_pct" not in st.session_state:
+        st.session_state.target_roi_pct = 25
+
+    def _step_roi(delta: int) -> None:
+        st.session_state.target_roi_pct = max(5, min(100, st.session_state.target_roi_pct + delta))
+
     target_roi_pct = st.slider(
         "Target ROI %",
         min_value=5,
         max_value=100,
-        value=25,
         step=1,
-        help="Default: 25%. Adjusts Max All-In Buy Price across all paths on the fly.",
+        key="target_roi_pct",
+        help="Default: 25%. Drag the slider or use the -1% / +1% buttons below for exact 1% steps.",
     )
+    btn_minus, btn_plus = st.columns(2)
+    with btn_minus:
+        st.button("➖ 1%", on_click=_step_roi, args=(-1,), width="stretch")
+    with btn_plus:
+        st.button("➕ 1%", on_click=_step_roi, args=(1,), width="stretch")
+
     target_roi_decimal = target_roi_pct / 100.0
 
     st.divider()
