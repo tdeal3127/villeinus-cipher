@@ -268,6 +268,49 @@ def parse_price_list(raw_text: str) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
+# Restricted Underground Vault PIN Gate (PIN: 3127)
+# ---------------------------------------------------------------------------
+if "vault_unlocked" not in st.session_state:
+    st.session_state.vault_unlocked = False
+
+if not st.session_state.vault_unlocked:
+    _, col_gate, _ = st.columns([1, 1.3, 1])
+    with col_gate:
+        st.write("")
+        st.write("")
+        with st.container(border=True):
+            if LOGO_PATH.exists():
+                st.image(str(LOGO_PATH), width="stretch")
+            st.markdown(
+                """
+                <div style="text-align:center; padding: 6px 0 10px 0;">
+                    <span class="vault-pill">RESTRICTED VAULT ACCESS</span>
+                    <h2 class="brand-hero-title" style="font-size:1.75rem;">🔒 THE CIPHER</h2>
+                    <p style="color:#94a3b8; font-size:0.9rem; margin-top:4px;">
+                        Authorized Ville-Ins Only. Enter 4-Digit Vault PIN:
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            entered_pin = st.text_input(
+                "Vault Access PIN",
+                type="password",
+                max_chars=4,
+                placeholder="••••",
+                label_visibility="collapsed",
+            )
+            unlock_clicked = st.button("🔓 UNLOCK THE CIPHER", width="stretch", type="primary")
+            if unlock_clicked or entered_pin:
+                if entered_pin.strip() == "3127":
+                    st.session_state.vault_unlocked = True
+                    st.rerun()
+                else:
+                    st.error("🚨 ACCESS DENIED — Invalid Vault PIN.")
+    st.stop()
+
+
+# ---------------------------------------------------------------------------
 # Sidebar Controls — Brand Logo, Margin Control & Data Source Mode
 # ---------------------------------------------------------------------------
 with st.sidebar:
