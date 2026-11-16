@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 import re
 import pandas as pd
@@ -480,9 +481,97 @@ else:
         }
 
 # ---------------------------------------------------------------------------
+# Custom Ville-In-Us Branded SVG Section Headers (Replaces Generic Emojis)
+# ---------------------------------------------------------------------------
+SVG_GRAD_DEFS = """
+<defs>
+    <linearGradient id="viuIconGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#c81e3a" />
+        <stop offset="55%" stop-color="#7e22ce" />
+        <stop offset="100%" stop-color="#4c1d95" />
+    </linearGradient>
+</defs>
+"""
+
+ICON_TIER1 = f"""
+<svg width="28" height="28" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+    {SVG_GRAD_DEFS}
+    <polygon points="8,2 28,2 34,8 34,28 28,34 8,34 2,28 2,8" fill="#09070f" stroke="#9333ea" stroke-width="2.5"/>
+    <polygon points="10,6 26,6 30,10 30,26 26,30 10,30 6,26 6,10" fill="url(#viuIconGrad)" stroke="#d8b4fe" stroke-width="1.2"/>
+    <circle cx="18" cy="18" r="5" fill="#09070f" stroke="#f43f5e" stroke-width="2"/>
+    <line x1="18" y1="8" x2="18" y2="13" stroke="#f8fafc" stroke-width="2"/>
+    <line x1="18" y1="23" x2="18" y2="28" stroke="#f8fafc" stroke-width="2"/>
+    <line x1="8" y1="18" x2="13" y2="18" stroke="#f8fafc" stroke-width="2"/>
+    <line x1="23" y1="18" x2="28" y2="18" stroke="#f8fafc" stroke-width="2"/>
+</svg>
+"""
+
+ICON_PATH_A = f"""
+<svg width="34" height="34" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+    {SVG_GRAD_DEFS}
+    <!-- Beveled Villain Shield Frame -->
+    <polygon points="3,5 37,5 33,35 7,35" fill="#09070f" stroke="#8b3dff" stroke-width="3" stroke-linejoin="miter"/>
+    <polygon points="3,5 37,5 33,35 7,35" fill="none" stroke="#d8b4fe" stroke-width="1" stroke-linejoin="miter"/>
+    <!-- Raw Card Silhouette + Sharp Heist Flip Slash Arrows -->
+    <rect x="12" y="9" width="16" height="22" rx="1" fill="url(#viuIconGrad)" stroke="#e9d5ff" stroke-width="1.3"/>
+    <path d="M 8,17 L 15,11 L 15,15 L 25,15 L 25,18 L 12,18 Z" fill="#ffffff"/>
+    <path d="M 32,23 L 25,29 L 25,25 L 15,25 L 15,22 L 28,22 Z" fill="#f43f5e"/>
+</svg>
+"""
+
+ICON_PATH_B = f"""
+<svg width="34" height="34" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+    {SVG_GRAD_DEFS}
+    <!-- Beveled Villain Shield Frame -->
+    <polygon points="3,5 37,5 33,35 7,35" fill="#09070f" stroke="#8b3dff" stroke-width="3" stroke-linejoin="miter"/>
+    <polygon points="3,5 37,5 33,35 7,35" fill="none" stroke="#d8b4fe" stroke-width="1" stroke-linejoin="miter"/>
+    <!-- Graded Slab Silhouette with Top Flip Label & "10" -->
+    <rect x="10" y="7" width="20" height="26" rx="1.5" fill="url(#viuIconGrad)" stroke="#e9d5ff" stroke-width="1.4"/>
+    <rect x="12" y="9" width="16" height="5" fill="#09070f" stroke="#f43f5e" stroke-width="1"/>
+    <text x="20" y="27" text-anchor="middle" font-family="'Orbitron', 'Arial Black', sans-serif" font-size="11" font-weight="900" fill="#ffffff" stroke="#d8b4fe" stroke-width="0.4">10</text>
+</svg>
+"""
+
+ICON_BAILOUT_9 = f"""
+<svg width="30" height="30" viewBox="0 0 38 38" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+    {SVG_GRAD_DEFS}
+    <!-- Angular Vault Armor Shield -->
+    <polygon points="19,2 34,8 31,25 19,36 7,25 4,8" fill="#09070f" stroke="#8b3dff" stroke-width="3" stroke-linejoin="miter"/>
+    <polygon points="19,5 31,10 28,24 19,33 10,24 7,10" fill="url(#viuIconGrad)" stroke="#e9d5ff" stroke-width="1.2" stroke-linejoin="miter"/>
+    <text x="19" y="24" text-anchor="middle" font-family="'Orbitron', 'Arial Black', sans-serif" font-size="14" font-weight="900" fill="#ffffff">9</text>
+</svg>
+"""
+
+ICON_PATH_C = f"""
+<svg width="34" height="34" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+    {SVG_GRAD_DEFS}
+    <polygon points="3,5 37,5 33,35 7,35" fill="#09070f" stroke="#8b3dff" stroke-width="3" stroke-linejoin="miter"/>
+    <polygon points="3,5 37,5 33,35 7,35" fill="none" stroke="#d8b4fe" stroke-width="1" stroke-linejoin="miter"/>
+    <rect x="9" y="9" width="15" height="21" rx="1" fill="#2e1065" stroke="#c084fc" stroke-width="1.2"/>
+    <rect x="16" y="7" width="15" height="21" rx="1" fill="url(#viuIconGrad)" stroke="#ffffff" stroke-width="1.3"/>
+    <rect x="18" y="9" width="11" height="4" fill="#09070f" stroke="#f43f5e" stroke-width="0.9"/>
+</svg>
+"""
+
+
+def brand_heading(icon_svg: str, title_text: str, size_rem: float = 1.28, icon_px: int = 34) -> str:
+    b64_svg = base64.b64encode(icon_svg.strip().encode("utf-8")).decode("ascii")
+    return (
+        f'<div style="display:flex; align-items:center; gap:12px; margin: 2px 0 6px 0;">'
+        f'<img src="data:image/svg+xml;base64,{b64_svg}" width="{icon_px}" height="{icon_px}" style="flex-shrink:0; display:block;" />'
+        f'<span style="font-family:\'Orbitron\',\'Chakra Petch\',sans-serif; font-size:{size_rem}rem; '
+        f'font-weight:900; letter-spacing:0.05em; color:#f8fafc; text-transform:uppercase;">'
+        f'{title_text}</span></div>'
+    )
+
+
+# ---------------------------------------------------------------------------
 # TIER 1 — Default Clean Snapshot (Always Visible)
 # ---------------------------------------------------------------------------
-st.subheader("⚡ Tier 1 — Valuation & Buy Ceiling Snapshot")
+st.markdown(
+    brand_heading(ICON_TIER1, "Tier 1 — Valuation & Buy Ceiling Snapshot", size_rem=1.22, icon_px=28),
+    unsafe_allow_html=True,
+)
 
 if detected_condition == "Raw":
     raw_stats = compute_comp_stats(card_sales_data.get("Raw", []))
@@ -524,7 +613,10 @@ if detected_condition == "Raw":
     # --- PATH A SUMMARY BLOCK ---
     with col_path_a:
         with st.container(border=True):
-            st.markdown("### 🔄 PATH A — RAW-TO-RAW FLIP")
+            st.markdown(
+                brand_heading(ICON_PATH_A, "PATH A — RAW-TO-RAW FLIP"),
+                unsafe_allow_html=True,
+            )
             st.caption("Buy Raw -> Sell Raw (Bypasses $47 PSA grading fee)")
 
             m1, m2 = st.columns(2)
@@ -540,7 +632,7 @@ if detected_condition == "Raw":
             )
 
             # TIER 2 — Clickable Arithmetic Breakdown (Path A)
-            with st.expander("🔍 Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path A)"):
+            with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path A)"):
                 st.markdown("#### 1. Net Payout & Max Buy Price Math")
                 st.markdown(
                     f"""
@@ -566,7 +658,10 @@ if detected_condition == "Raw":
     # --- PATH B SUMMARY BLOCK ---
     with col_path_b:
         with st.container(border=True):
-            st.markdown("### 💎 PATH B — RAW-TO-PSA 10 GRADE")
+            st.markdown(
+                brand_heading(ICON_PATH_B, "PATH B — RAW-TO-PSA 10 GRADE"),
+                unsafe_allow_html=True,
+            )
             st.caption("Buy Raw -> Grade with PSA ($47.00 all-in) -> Sell PSA 10")
 
             b1, b2 = st.columns(2)
@@ -582,7 +677,10 @@ if detected_condition == "Raw":
             )
 
             st.divider()
-            st.markdown("#### 🛡️ PSA 9 BAILOUT CHECK")
+            st.markdown(
+                brand_heading(ICON_BAILOUT_9, "PSA 9 BAILOUT CHECK", size_rem=1.08, icon_px=30),
+                unsafe_allow_html=True,
+            )
             bail_col1, bail_col2, bail_col3 = st.columns(3)
             bail_col1.metric("30-Day PSA 9 Median", f"${bailout_9['psa9_median']:,.2f}")
             bail_col2.metric(
@@ -598,7 +696,7 @@ if detected_condition == "Raw":
             )
 
             # TIER 2 — Clickable Arithmetic Breakdown (Path B)
-            with st.expander("🔍 Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path B)"):
+            with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path B)"):
                 st.markdown("#### 1. PSA 10 Net Payout & Max Buy Price Math")
                 st.markdown(
                     f"""
@@ -655,7 +753,10 @@ else:
     )
 
     with st.container(border=True):
-        st.markdown(f"### 🏆 PATH C — SLAB-TO-SLAB FLIP ({detected_condition})")
+        st.markdown(
+            brand_heading(ICON_PATH_C, f"PATH C — SLAB-TO-SLAB FLIP ({detected_condition})"),
+            unsafe_allow_html=True,
+        )
         st.caption(f"Buy {detected_condition} Slab -> Sell {detected_condition} Slab (Grading cost bypassed: $0.00)")
 
         c1, c2, c3, c4 = st.columns(4)
@@ -669,7 +770,7 @@ else:
         )
 
         # TIER 2 — Clickable Arithmetic Breakdown (Path C)
-        with st.expander(f"🔍 Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path C: {detected_condition})"):
+        with st.expander(f"➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path C: {detected_condition})"):
             st.markdown("#### 1. Net Payout & Max Buy Price Math")
             st.markdown(
                 f"""
