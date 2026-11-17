@@ -364,7 +364,7 @@ def classify_sale_condition(item: dict) -> str:
     return "Raw"
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live_cardapi_comps(
     query_str: str,
     api_key: str,
@@ -484,7 +484,7 @@ def fetch_live_cardapi_comps(
         }
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live_graded_auctions(
     query_str: str,
     api_key: str,
@@ -633,7 +633,7 @@ def lookup_psa_cert(cert_num: str, psa_token: str, cs_key: str) -> dict:
     }
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live_compsniper_comps(
     query_str: str,
     api_key: str,
@@ -1296,7 +1296,7 @@ if data_mode == "Live Sold Comps":
         )
     detected_condition = "Raw"
 
-    fcol1, fcol2, fcol3, fcol4 = st.columns([1.2, 1.3, 1.1, 1.4])
+    fcol1, fcol2, fcol3, fcol4, fcol5 = st.columns([1.1, 1.0, 1.2, 1.0, 1.3])
     with fcol1:
         auto_filter_mode = st.selectbox(
             "Autograph Filter",
@@ -1305,22 +1305,29 @@ if data_mode == "Live Sold Comps":
             help="Separates True Silver Non-Autos from True Silver Autographs that share the same card #.",
         )
     with fcol2:
+        comps_grade_filter = st.selectbox(
+            "Grade Filter",
+            options=["All", "Raw Only", "Slabs Only"],
+            index=0,
+            help="Filter the sales table to Raw only, Slabs only, or All.",
+        )
+    with fcol3:
         exclude_inserts_flag = st.checkbox(
-            "Block Inserts, Variations & Other Sets",
+            "Block Inserts & Other Sets",
             value=True,
             help="Automatically filters out Flashback, Emergent, Variation, Relic/Jersey, Select, Mosaic, and Draft Picks.",
         )
-    with fcol3:
+    with fcol4:
         include_bo_flag = st.checkbox(
-            "Include Best Offer Sales",
+            "Include Best Offer",
             value=True,
             help="CompSniper returns the actual accepted Best Offer price; The Card API uses the listed ask when hidden.",
         )
-    with fcol4:
+    with fcol5:
         include_auctions_flag = st.checkbox(
-            "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
-            value=True,
-            help="Pulls verified graded card sales (with Buyer's Premium included) from Goldin, Fanatics Collect, MySlabs, and Pristine.",
+            "Include Graded Auctions",
+            value=False,
+            help="Off by default to save CompSniper credits (1 call vs 5 calls). Turn ON to add Goldin, Fanatics, MySlabs & Pristine.",
         )
 
     card_sales_data = {"Raw": [], "PSA 10": [], "PSA 9": [], "BGS 9.5": [], "SGC 10": []}
@@ -1342,6 +1349,10 @@ if data_mode == "Live Sold Comps":
                 include_auctions_flag,
             )
         live_records = merged_records
+        if comps_grade_filter == "Raw Only":
+            live_records = [r for r in live_records if r.get("Condition") == "Raw"]
+        elif comps_grade_filter == "Slabs Only":
+            live_records = [r for r in live_records if r.get("Condition") != "Raw"]
 
         if errors and not live_records:
             st.error(" | ".join(errors))
@@ -1821,13 +1832,22 @@ elif data_mode == "eBay Live Listings (Buy Side)":
             ["Matching Grade Only", "All Grades", "Deals Only"],
             key="buy_show",
         )
-    buy_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="buy_excl")
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        buy_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="buy_excl")
+    with bc2:
+        buy_auctions = st.checkbox(
+            "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
+            value=False,
+            key="buy_auctions",
+            help="Off by default to save CompSniper credits (1 call vs 5 calls). Toggle ON when checking raw-to-slab or slab comps.",
+        )
 
     if not buy_query.strip():
         st.info("🔎 Enter a card above and press **Enter** (or click **⚡ Bijan Silver #305**) to load Tier 1 buy ceilings & live eBay listings. Blank by default so opening the app uses zero API tokens.")
     else:
         with st.spinner("Pulling 30-day comps + live eBay listings..."):
-            deal_res = build_deal_rows(buy_query, buy_excl, buy_auto, True, True, buy_sort, buy_type)
+            deal_res = build_deal_rows(buy_query, buy_excl, buy_auto, True, buy_auctions, buy_sort, buy_type)
 
         for e_ in deal_res["errors"]:
             st.caption(f"⚠️ {e_}")
@@ -1879,28 +1899,58 @@ elif data_mode == "Deal Finder":
         df_grades = st.selectbox("Grades", ["All", "Raw only", "Slabs only"], key="df_grades")
     with dfc3:
         df_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"], key="df_type")
-    df_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="df_excl")
-    df_deals_only = st.checkbox("Deals only (hide listings over ceiling)", value=True, key="df_deals_only")
+    dc1, dc2, dc3 = st.columns(3)
+    with dc1:
+        df_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="df_excl")
+    with dc2:
+        df_auctions = st.checkbox(
+            "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
+            value=True,
+            key="df_auctions",
+            help="ON by default in Deal Finder so it searches everything (eBay + Graded Auction Houses).",
+        )
+    with dc3:
+        df_deals_only = st.checkbox("Deals only (hide listings over ceiling)", value=True, key="df_deals_only")
 
     if st.button("🔎 Run Deal Finder", type="primary"):
         queries = [q.strip() for q in watchlist_text.splitlines() if q.strip()][:8]
         all_rows: list[dict] = []
+        all_sales: dict[str, dict] = {}
         scan_errors: list[str] = []
         prog = st.progress(0.0, text="Scanning...")
         for i_, q_ in enumerate(queries):
             prog.progress(i_ / max(len(queries), 1), text=f"Scanning: {q_}")
-            res_ = build_deal_rows(q_, df_excl, df_auto, True, True, "Price + Shipping: Lowest First", df_type)
+            res_ = build_deal_rows(q_, df_excl, df_auto, True, df_auctions, "Price + Shipping: Lowest First", df_type)
+            all_sales[q_] = res_.get("sales", {})
             if res_["ok"]:
                 all_rows.extend(res_["rows"])
             else:
                 scan_errors.append(f"{q_}: {res_['error']}")
         prog.empty()
         st.session_state["deal_finder_rows"] = all_rows
+        st.session_state["deal_finder_sales"] = all_sales
         st.session_state["deal_finder_errors"] = scan_errors
 
     if "deal_finder_rows" in st.session_state:
         for e_ in st.session_state.get("deal_finder_errors", []):
             st.error(e_)
+        sales_map = st.session_state.get("deal_finder_sales", {})
+        if sales_map:
+            t1_col1, t1_col2 = st.columns([2.2, 1])
+            with t1_col1:
+                t1_card = st.selectbox("Tier 1 Buy Ceiling Card", options=list(sales_map.keys()), key="df_t1_card")
+            with t1_col2:
+                t1_grade = st.selectbox(
+                    "Valuation Grade",
+                    options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
+                    index=0,
+                    key="df_t1_grade",
+                )
+            render_tier1(sales_map[t1_card], t1_grade, t1_card)
+            st.markdown(
+                brand_heading(ICON_PATH_B, "Deal Finder Results", size_rem=1.22, icon_px=30),
+                unsafe_allow_html=True,
+            )
         rows_ = st.session_state["deal_finder_rows"]
         if rows_:
             dfinder = pd.DataFrame(rows_)
