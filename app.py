@@ -490,6 +490,7 @@ def fetch_live_compsniper_comps(
     api_key: str,
     exclude_inserts: bool = True,
     auto_filter: str = "All",
+    include_best_offer: bool = True,
 ) -> dict:
     """Query CompSniper API (/v1/scrape?sold=true) for up to 240 sold eBay comps with true Best Offer prices."""
     records: list[dict] = []
@@ -563,6 +564,8 @@ def fetch_live_compsniper_comps(
 
             buy_fmt = str(item.get("buyingFormat") or "")
             if item.get("bestOfferAccepted"):
+                if not include_best_offer:
+                    continue
                 type_label = "Best Offer (Accepted)"
             elif buy_fmt == "auction":
                 type_label = f"Auction ({item.get('bidCount') or 0} bids)"
