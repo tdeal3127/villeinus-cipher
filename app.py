@@ -365,6 +365,19 @@ def classify_sale_condition(item: dict) -> str:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _raw_cardapi_sales(query_clean: str, api_key: str, limit: int) -> dict:
+    """Cached raw HTTP call to The Card API so toggling UI filters uses 0 extra quota."""
+    resp = requests.get(
+        "https://thecardapi.com/api/v1/market/sales",
+        params={"q": query_clean, "limit": limit},
+        headers={"x-market-api-key": api_key.strip(), "accept": "application/json"},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"API returned HTTP {resp.status_code}: {resp.text[:200]}", "payload": {}}
+    return {"ok": True, "error": "", "payload": resp.json()}
+
+
 def fetch_live_cardapi_comps(
     query_str: str,
     api_key: str,
@@ -380,21 +393,16 @@ def fetch_live_cardapi_comps(
         return {"ok": False, "error": "Enter a card search query.", "records": records, "total_matched": 0}
 
     try:
-        resp = requests.get(
-            "https://thecardapi.com/api/v1/market/sales",
-            params={"q": query_str.strip(), "limit": limit},
-            headers={"x-market-api-key": api_key.strip(), "accept": "application/json"},
-            timeout=15,
-        )
-        if resp.status_code != 200:
+        raw_res = _raw_cardapi_sales(query_str.strip().lower(), api_key.strip(), limit)
+        if not raw_res["ok"]:
             return {
                 "ok": False,
-                "error": f"API returned HTTP {resp.status_code}: {resp.text[:200]}",
+                "error": raw_res["error"],
                 "records": records,
                 "total_matched": 0,
             }
 
-        payload = resp.json()
+        payload = raw_res["payload"]
         raw_items = payload.get("data", [])
         total_matched = (payload.get("pagination") or {}).get("total", len(raw_items))
 
@@ -485,6 +493,19 @@ def fetch_live_cardapi_comps(
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _raw_compsniper_house(slug: str, query_clean: str, api_key: str) -> list[dict]:
+    """Cached raw HTTP call per CompSniper graded auction house so UI filter toggles cost 0 credits."""
+    resp = requests.get(
+        f"https://api.compsniper.com/v1/{slug}/sold",
+        params={"keyword": query_clean},
+        headers={"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"},
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        return []
+    return resp.json().get("items", [])
+
+
 def fetch_live_graded_auctions(
     query_str: str,
     api_key: str,
@@ -496,7 +517,7 @@ def fetch_live_graded_auctions(
     if not query_str.strip() or not api_key.strip():
         return {"ok": False, "error": "", "records": records}
 
-    headers = {"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"}
+    q_clean = query_str.strip().lower()
     raw_tokens = [t.strip().lower() for t in query_str.split() if t.strip()]
     required_tokens = [t.lstrip("#") for t in raw_tokens if not t.startswith("-")]
     excluded_tokens = [t[1:] for t in raw_tokens if t.startswith("-") and len(t) > 1]
@@ -509,15 +530,7 @@ def fetch_live_graded_auctions(
     ]
     for slug, label in houses:
         try:
-            resp = requests.get(
-                f"https://api.compsniper.com/v1/{slug}/sold",
-                params={"keyword": query_str.strip()},
-                headers=headers,
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                continue
-            items = resp.json().get("items", [])
+            items = _raw_compsniper_house(slug, q_clean, api_key.strip())
             for item in items:
                 title = str(item.get("title") or "")
                 title_lower = title.lower()
@@ -634,6 +647,28 @@ def lookup_psa_cert(cert_num: str, psa_token: str, cs_key: str) -> dict:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _raw_compsniper_scrape(query_clean: str, api_key: str) -> dict:
+    """Cached raw HTTP call to CompSniper /v1/scrape so toggling UI filters uses 0 extra credits."""
+    url = "https://api.compsniper.com/v1/scrape"
+    params = {"keyword": query_clean, "sold": "true", "ebaySite": "ebay.com"}
+    headers = {"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"}
+
+    resp = None
+    for attempt in range(3):
+        resp = requests.get(url, params=params, headers=headers, timeout=25)
+        if resp.status_code in (429, 503) and attempt < 2:
+            retry_wait = int(resp.headers.get("Retry-After", "2") or 2)
+            time.sleep(min(retry_wait, 5))
+            continue
+        break
+
+    if resp is None or resp.status_code != 200:
+        code = resp.status_code if resp is not None else "N/A"
+        body = resp.text[:200] if resp is not None else ""
+        return {"ok": False, "error": f"CompSniper HTTP {code}: {body}", "payload": {}}
+    return {"ok": True, "error": "", "payload": resp.json()}
+
+
 def fetch_live_compsniper_comps(
     query_str: str,
     api_key: str,
@@ -648,26 +683,12 @@ def fetch_live_compsniper_comps(
     if not api_key.strip():
         return {"ok": False, "error": "Missing COMPSNIPER_API_KEY in secrets/environment.", "records": records, "total_matched": 0}
 
-    url = "https://api.compsniper.com/v1/scrape"
-    params = {"keyword": query_str.strip(), "sold": "true", "ebaySite": "ebay.com"}
-    headers = {"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"}
-
     try:
-        resp = None
-        for attempt in range(3):
-            resp = requests.get(url, params=params, headers=headers, timeout=25)
-            if resp.status_code in (429, 503) and attempt < 2:
-                retry_wait = int(resp.headers.get("Retry-After", "2") or 2)
-                time.sleep(min(retry_wait, 5))
-                continue
-            break
+        raw_res = _raw_compsniper_scrape(query_str.strip().lower(), api_key.strip())
+        if not raw_res["ok"]:
+            return {"ok": False, "error": raw_res["error"], "records": records, "total_matched": 0}
 
-        if resp is None or resp.status_code != 200:
-            code = resp.status_code if resp is not None else "N/A"
-            body = resp.text[:200] if resp is not None else ""
-            return {"ok": False, "error": f"CompSniper HTTP {code}: {body}", "records": records, "total_matched": 0}
-
-        payload = resp.json()
+        payload = raw_res["payload"]
         raw_items = payload.get("items", [])
         total_matched = payload.get("totalResults") or payload.get("totalItems") or len(raw_items)
 
