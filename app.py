@@ -485,6 +485,155 @@ def fetch_live_cardapi_comps(
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def fetch_live_graded_auctions(
+    query_str: str,
+    api_key: str,
+    exclude_inserts: bool = True,
+    auto_filter: str = "All",
+) -> dict:
+    """Query CompSniper Graded Card Auction Houses (Goldin, Fanatics Collect, MySlabs, Pristine)."""
+    records: list[dict] = []
+    if not query_str.strip() or not api_key.strip():
+        return {"ok": False, "error": "", "records": records}
+
+    headers = {"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"}
+    raw_tokens = [t.strip().lower() for t in query_str.split() if t.strip()]
+    required_tokens = [t.lstrip("#") for t in raw_tokens if not t.startswith("-")]
+    excluded_tokens = [t[1:] for t in raw_tokens if t.startswith("-") and len(t) > 1]
+
+    houses = [
+        ("goldin", "Goldin Auctions"),
+        ("fanatics", "Fanatics Collect"),
+        ("myslabs", "MySlabs"),
+        ("pristine", "Pristine Auction"),
+    ]
+    for slug, label in houses:
+        try:
+            resp = requests.get(
+                f"https://api.compsniper.com/v1/{slug}/sold",
+                params={"keyword": query_str.strip()},
+                headers=headers,
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                continue
+            items = resp.json().get("items", [])
+            for item in items:
+                title = str(item.get("title") or "")
+                title_lower = title.lower()
+                if JUNK_TITLE_PATTERNS.search(title):
+                    continue
+                if any(ex in title_lower for ex in excluded_tokens):
+                    continue
+                if exclude_inserts:
+                    if any(w in title_lower and not any(w in req for req in required_tokens) for w in INSERT_AND_OTHER_SET_WORDS):
+                        continue
+                is_auto = bool(AUTO_PATTERN.search(title))
+                if auto_filter == "Non-Auto Only" and is_auto:
+                    continue
+                if auto_filter == "Autographs Only" and not is_auto:
+                    continue
+                if not all(tok in title_lower for tok in required_tokens):
+                    continue
+
+                try:
+                    price = float(item.get("price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+
+                grader = str(item.get("gradingService") or "").upper()
+                grade = str(item.get("grade") or "")
+                cond = classify_sale_condition({"title": title, "grader": grader, "grade": grade})
+                sold_at = str(item.get("soldAt") or "")[:10]
+                cert_num = str(item.get("certNumber") or "")
+                card_num_match = re.search(r"#\s*([A-Za-z0-9-]+)", title)
+                card_num = card_num_match.group(1) if card_num_match else (f"Cert #{cert_num}" if cert_num else "")
+
+                records.append(
+                    {
+                        "Include": True,
+                        "Photo": str(item.get("imageUrl") or ""),
+                        "Condition": cond,
+                        "Sold Price ($)": price,
+                        "Sale Date": sold_at,
+                        "Card #": card_num,
+                        "Type": str(item.get("saleType") or "Auction"),
+                        "Source": label,
+                        "Listing Title": title,
+                        "Link": str(item.get("url") or (f"https://www.psacard.com/cert/{cert_num}" if cert_num else "")),
+                        "_item_id": f"{slug}_{item.get('saleId') or title}",
+                    }
+                )
+        except Exception:
+            continue
+
+    return {"ok": True, "error": "", "records": records}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def lookup_psa_cert(cert_num: str, psa_token: str, cs_key: str) -> dict:
+    """Query PSA Public API GetByCertNumber and cross-check recent marketplace sales for that Cert #."""
+    clean_cert = re.sub(r"\D", "", cert_num or "")
+    if not clean_cert:
+        return {"ok": False, "error": "Enter a numeric PSA Cert #."}
+
+    psa_data = None
+    psa_msg = ""
+    if psa_token.strip():
+        try:
+            r = requests.get(
+                f"https://api.psacard.com/publicapi/cert/GetByCertNumber/{clean_cert}",
+                headers={
+                    "Authorization": f"bearer {psa_token.strip()}",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                },
+                timeout=15,
+            )
+            if r.status_code == 200:
+                body = r.json()
+                psa_data = body.get("PSACert") or body
+            else:
+                psa_msg = r.json().get("Message", f"HTTP {r.status_code}")
+        except Exception as exc:
+            psa_msg = str(exc)
+
+    market_hits: list[dict] = []
+    if cs_key.strip():
+        try:
+            r_eb = requests.get(
+                "https://api.compsniper.com/v1/scrape",
+                params={"keyword": f"PSA {clean_cert}", "sold": "true", "ebaySite": "ebay.com"},
+                headers={"Authorization": f"Bearer {cs_key.strip()}"},
+                timeout=15,
+            )
+            if r_eb.status_code == 200:
+                for it in r_eb.json().get("items", [])[:3]:
+                    market_hits.append(
+                        {
+                            "title": it.get("title"),
+                            "price": it.get("soldPrice"),
+                            "date": it.get("endedAt"),
+                            "source": "eBay Sold",
+                            "image": it.get("thumbnailUrl"),
+                        }
+                    )
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "cert": clean_cert,
+        "psa_data": psa_data,
+        "psa_msg": psa_msg,
+        "market_hits": market_hits,
+        "cert_url": f"https://www.psacard.com/cert/{clean_cert}",
+    }
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_live_compsniper_comps(
     query_str: str,
     api_key: str,
@@ -715,6 +864,37 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("3. PSA Cert # Slab Scanner")
+    psa_cert_input = st.text_input(
+        "Verify PSA Cert # (e.g. 100855050)",
+        placeholder="Enter 8-9 digit Cert #...",
+        help="Checks PSA's Public API and cross-searches recent eBay/Auction sales for that exact slab.",
+    )
+    if psa_cert_input.strip():
+        cert_res = lookup_psa_cert(
+            psa_cert_input.strip(),
+            get_secret_key("PSA_API_TOKEN"),
+            get_secret_key("COMPSNIPER_API_KEY"),
+        )
+        if not cert_res["ok"]:
+            st.warning(cert_res["error"])
+        else:
+            st.markdown(f"🔗 **[Open Official PSA Cert #{cert_res['cert']} Page ↗]({cert_res['cert_url']})**")
+            if cert_res["psa_data"]:
+                p = cert_res["psa_data"]
+                st.success(
+                    f"**{p.get('Year', '')} {p.get('Brand', '')} #{p.get('CardNumber', '')}**\n\n"
+                    f"Subject: **{p.get('Subject', '')}** ({p.get('Variety', '')})\n\n"
+                    f"Grade: **PSA {p.get('CardGrade', '')}** | Pop: **{p.get('TotalPopulation', 'N/A')}** "
+                    f"(Higher: {p.get('PopulationHigher', 0)})"
+                )
+            elif cert_res["psa_msg"]:
+                st.caption(f"ℹ️ PSA API Status: {cert_res['psa_msg']}")
+            if cert_res["market_hits"]:
+                for mh in cert_res["market_hits"]:
+                    st.caption(f"💰 **{mh['source']}:** \\${mh['price']} ({mh['date']}) — {mh['title']}")
+
+    st.divider()
     st.subheader("Fixed Friction Rules")
     st.markdown(
         f"""
@@ -779,7 +959,7 @@ if data_mode in (
             index=0,
         )
 
-    fcol1, fcol2, fcol3 = st.columns([1.3, 1.4, 1.3])
+    fcol1, fcol2, fcol3, fcol4 = st.columns([1.2, 1.3, 1.1, 1.4])
     with fcol1:
         auto_filter_mode = st.selectbox(
             "Autograph Filter",
@@ -798,6 +978,12 @@ if data_mode in (
             "Include Best Offer Sales",
             value=True,
             help="CompSniper returns the actual accepted Best Offer price; The Card API uses the listed ask when hidden.",
+        )
+    with fcol4:
+        include_auctions_flag = st.checkbox(
+            "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
+            value=True,
+            help="Pulls verified graded card sales (with Buyer's Premium included) from Goldin, Fanatics Collect, MySlabs, and Pristine.",
         )
 
     cs_key = get_secret_key("COMPSNIPER_API_KEY")
@@ -824,6 +1010,20 @@ if data_mode in (
                         merged_records.append(r)
             elif cs_res["error"]:
                 errors.append(f"CompSniper: {cs_res['error']}")
+
+            if include_auctions_flag:
+                auc_res = fetch_live_graded_auctions(
+                    selected_card_title,
+                    cs_key,
+                    exclude_inserts=exclude_inserts_flag,
+                    auto_filter=auto_filter_mode,
+                )
+                if auc_res["ok"]:
+                    for r in auc_res["records"]:
+                        item_id = r.get("_item_id") or r["Listing Title"]
+                        if item_id not in seen_ids:
+                            seen_ids.add(item_id)
+                            merged_records.append(r)
 
         if data_mode in ("Live Sold Comps (CompSniper + The Card API)", "The Card API Live (Multi-Marketplace)"):
             tca_res = fetch_live_cardapi_comps(
