@@ -1,4 +1,5 @@
 import base64
+import hmac
 import os
 from pathlib import Path
 import re
@@ -853,14 +854,10 @@ def fetch_ebay_active_listings(query: str, app_id: str, cert_id: str, sort: str,
 
 
 # ---------------------------------------------------------------------------
-# Restricted Underground Vault PIN Gate (PIN: 3127 or Token Handoff)
+# Restricted Underground Vault PIN Gate (Server-side secret in VAULT_PIN)
 # ---------------------------------------------------------------------------
 if "vault_unlocked" not in st.session_state:
     st.session_state.vault_unlocked = False
-
-if st.query_params.get("vault") == "viu5aba":
-    st.session_state.vault_unlocked = True
-    st.query_params.clear()
 
 if not st.session_state.vault_unlocked:
     _, col_gate, _ = st.columns([1, 1.3, 1])
@@ -891,7 +888,10 @@ if not st.session_state.vault_unlocked:
             )
             unlock_clicked = st.button("🔓 UNLOCK THE CIPHER", width="stretch", type="primary")
             if unlock_clicked or entered_pin:
-                if entered_pin.strip() == "3127":
+                vault_pin = get_secret_key("VAULT_PIN")
+                if not vault_pin:
+                    st.error("🚨 Vault PIN is not configured in server secrets (`VAULT_PIN`).")
+                elif hmac.compare_digest(entered_pin.strip(), vault_pin):
                     st.session_state.vault_unlocked = True
                     st.rerun()
                 else:
