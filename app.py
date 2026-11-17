@@ -1105,7 +1105,19 @@ def build_deal_rows(
     sort: str,
     buy_type: str,
 ) -> dict:
-    """Pull comps + active eBay listings for one search and score every listing against its buy ceiling."""
+    """Check active eBay listings first (free 5,000/day); only pull CompSniper comps if matching listings exist."""
+    el = fetch_ebay_active_listings(
+        query, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), sort, buy_type
+    )
+    if not el["ok"]:
+        return {"ok": False, "error": el["error"], "rows": [], "sales": {}, "errors": []}
+
+    filtered_listings = [
+        l for l in el["records"] if title_passes_filters(l["Title"], query, exclude_inserts, auto_filter)
+    ]
+    if not filtered_listings:
+        return {"ok": True, "error": "", "rows": [], "sales": {}, "errors": []}
+
     cs_key = get_secret_key("COMPSNIPER_API_KEY")
     tca_key = get_secret_key("THECARDAPI_KEY")
     recs, errors = gather_merged_comps(query, cs_key, tca_key, exclude_inserts, auto_filter, include_bo, include_auctions)
@@ -1114,17 +1126,9 @@ def build_deal_rows(
         if r.get("Include", True):
             sales.setdefault(r["Condition"], []).append(float(r["Sold Price ($)"]))
 
-    el = fetch_ebay_active_listings(
-        query, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), sort, buy_type
-    )
-    if not el["ok"]:
-        return {"ok": False, "error": el["error"], "rows": [], "sales": sales, "errors": errors}
-
     ceil_cache: dict[str, dict] = {}
     rows: list[dict] = []
-    for l in el["records"]:
-        if not title_passes_filters(l["Title"], query, exclude_inserts, auto_filter):
-            continue
+    for l in filtered_listings:
         cond = classify_sale_condition({"title": l["Title"]})
         if cond not in ceil_cache:
             ceil_cache[cond] = compute_ceilings(sales, cond)
