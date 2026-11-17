@@ -1,6 +1,8 @@
 import base64
+import os
 from pathlib import Path
 import re
+import time
 import pandas as pd
 import requests
 import streamlit as st
@@ -280,7 +282,15 @@ def parse_price_list(raw_text: str) -> list[float]:
     return [float(m) for m in matches if float(m) > 0]
 
 
-DEFAULT_TCA_KEY = "tca_6f95c35cabd6ad4af150e6ce10d6d119b5716c2cd3aadeaa"
+def get_secret_key(env_name: str) -> str:
+    """Read an API key from environment variable or Streamlit secrets without hardcoding in source."""
+    val = os.environ.get(env_name, "").strip()
+    if val:
+        return val
+    try:
+        return str(st.secrets.get(env_name, "")).strip()
+    except Exception:
+        return ""
 
 JUNK_TITLE_PATTERNS = re.compile(
     r"\b(lot\s+of|card\s+lot|player\s+lot|team\s+lot|box\s+break|case\s+break|"
@@ -316,7 +326,7 @@ INSERT_AND_OTHER_SET_WORDS = [
     "absolute",
 ]
 
-AUTO_PATTERN = re.compile(r"\b(auto|autograph|autographs|signed|on-card\s+auto)\b", re.IGNORECASE)
+AUTO_PATTERN = re.compile(r"\b(auto|autograph|autographs|signed|on-card\s+auto|au)\b", re.IGNORECASE)
 
 
 def classify_sale_condition(item: dict) -> str:
@@ -339,16 +349,16 @@ def classify_sale_condition(item: dict) -> str:
     if grader and grade_raw:
         return f"{grader} {grade_raw}"
 
-    # Fallback title inspection if grader/grade fields were null
-    if re.search(r"\bPSA\s*(?:GEM\s*MT\s*)?10\b", title):
+    # Fallback title inspection (handles emojis/words between grader & grade, e.g. 'PSA 💎 MINT 10')
+    if re.search(r"\bPSA\b[^\d]{0,18}\b10\b", title):
         return "PSA 10"
-    if re.search(r"\bPSA\s*(?:MINT\s*)?9\b", title):
+    if re.search(r"\bPSA\b[^\d]{0,18}\b9\b(?!\.5)", title):
         return "PSA 9"
-    if re.search(r"\b(?:BGS|BECKETT)\s*9\.5\b", title):
+    if re.search(r"\b(?:BGS|BECKETT|BVG)\b[^\d]{0,18}\b9\.5\b", title):
         return "BGS 9.5"
-    if re.search(r"\bSGC\s*(?:GEM\s*MT\s*)?10\b", title):
+    if re.search(r"\bSGC\b[^\d]{0,18}\b10\b", title):
         return "SGC 10"
-    if re.search(r"\b(?:PSA|BGS|SGC|CGC)\s+\d+(?:\.\d+)?\b", title):
+    if re.search(r"\b(?:PSA|BGS|BECKETT|SGC|CGC)\b[^\d]{0,15}\b\d+(?:\.\d+)?\b", title):
         return "Other Slab"
 
     return "Raw"
@@ -411,8 +421,9 @@ def fetch_live_cardapi_comps(
                 if blocked_by_insert:
                     continue
 
-            # Check Auto vs Non-Auto filter
-            is_auto = bool(AUTO_PATTERN.search(title))
+            # Check Auto vs Non-Auto filter (both title regex and structured features list)
+            features_list = [str(f).lower() for f in (item.get("features") or [])]
+            is_auto = bool(AUTO_PATTERN.search(title)) or any("auto" in f for f in features_list)
             if auto_filter == "Non-Auto Only" and is_auto:
                 continue
             if auto_filter == "Autographs Only" and not is_auto:
@@ -451,8 +462,131 @@ def fetch_live_cardapi_comps(
                     "Sale Date": str(item.get("sale_date") or ""),
                     "Card #": str(item.get("card_number") or ""),
                     "Type": type_label,
+                    "Source": f"TheCardAPI ({item.get('platform') or 'eBay'})",
                     "Listing Title": title,
                     "Link": str(item.get("listing_url") or ""),
+                    "_item_id": str(item.get("id") or title),
+                }
+            )
+
+        return {
+            "ok": True,
+            "error": "",
+            "records": records,
+            "total_matched": total_matched,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "records": records,
+            "total_matched": 0,
+        }
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_live_compsniper_comps(
+    query_str: str,
+    api_key: str,
+    exclude_inserts: bool = True,
+    auto_filter: str = "All",
+) -> dict:
+    """Query CompSniper API (/v1/scrape?sold=true) for up to 240 sold eBay comps with true Best Offer prices."""
+    records: list[dict] = []
+    if not query_str.strip():
+        return {"ok": False, "error": "Enter a card search query.", "records": records, "total_matched": 0}
+    if not api_key.strip():
+        return {"ok": False, "error": "Missing COMPSNIPER_API_KEY in secrets/environment.", "records": records, "total_matched": 0}
+
+    url = "https://api.compsniper.com/v1/scrape"
+    params = {"keyword": query_str.strip(), "sold": "true", "ebaySite": "ebay.com"}
+    headers = {"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"}
+
+    try:
+        resp = None
+        for attempt in range(3):
+            resp = requests.get(url, params=params, headers=headers, timeout=25)
+            if resp.status_code in (429, 503) and attempt < 2:
+                retry_wait = int(resp.headers.get("Retry-After", "2") or 2)
+                time.sleep(min(retry_wait, 5))
+                continue
+            break
+
+        if resp is None or resp.status_code != 200:
+            code = resp.status_code if resp is not None else "N/A"
+            body = resp.text[:200] if resp is not None else ""
+            return {"ok": False, "error": f"CompSniper HTTP {code}: {body}", "records": records, "total_matched": 0}
+
+        payload = resp.json()
+        raw_items = payload.get("items", [])
+        total_matched = payload.get("totalResults") or payload.get("totalItems") or len(raw_items)
+
+        raw_tokens = [t.strip().lower() for t in query_str.split() if t.strip()]
+        required_tokens = [t.lstrip("#") for t in raw_tokens if not t.startswith("-")]
+        excluded_tokens = [t[1:] for t in raw_tokens if t.startswith("-") and len(t) > 1]
+
+        for item in raw_items:
+            title = str(item.get("title") or "")
+            title_lower = title.lower()
+            if JUNK_TITLE_PATTERNS.search(title):
+                continue
+            if any(ex in title_lower for ex in excluded_tokens):
+                continue
+
+            if exclude_inserts:
+                blocked_by_insert = False
+                for w in INSERT_AND_OTHER_SET_WORDS:
+                    if w in title_lower and not any(w in req for req in required_tokens):
+                        blocked_by_insert = True
+                        break
+                if blocked_by_insert:
+                    continue
+
+            is_auto = bool(AUTO_PATTERN.search(title))
+            if auto_filter == "Non-Auto Only" and is_auto:
+                continue
+            if auto_filter == "Autographs Only" and not is_auto:
+                continue
+
+            if not all(tok in title_lower for tok in required_tokens):
+                continue
+
+            try:
+                price = float(item.get("soldPrice") or 0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+
+            cond = classify_sale_condition({"title": title})
+            img_url = str(item.get("thumbnailUrl") or item.get("fullResThumbnailUrl") or "")
+
+            buy_fmt = str(item.get("buyingFormat") or "")
+            if item.get("bestOfferAccepted"):
+                type_label = "Best Offer (Accepted)"
+            elif buy_fmt == "auction":
+                type_label = f"Auction ({item.get('bidCount') or 0} bids)"
+            elif buy_fmt == "buyItNow":
+                type_label = "Buy It Now"
+            else:
+                type_label = "Sold"
+
+            card_num_match = re.search(r"#\s*([A-Za-z0-9-]+)", title)
+            card_num = card_num_match.group(1) if card_num_match else ""
+
+            records.append(
+                {
+                    "Include": True,
+                    "Photo": img_url,
+                    "Condition": cond,
+                    "Sold Price ($)": price,
+                    "Sale Date": str(item.get("endedAt") or ""),
+                    "Card #": card_num,
+                    "Type": type_label,
+                    "Source": "CompSniper (eBay)",
+                    "Listing Title": title,
+                    "Link": str(item.get("url") or ""),
+                    "_item_id": str(item.get("itemId") or title),
                 }
             )
 
@@ -567,7 +701,9 @@ with st.sidebar:
     data_mode = st.radio(
         "30-Day Comps Source",
         options=[
-            "Live Sold Comps (The Card API)",
+            "Live Sold Comps (CompSniper + The Card API)",
+            "CompSniper Live (eBay Sold — 240/call)",
+            "The Card API Live (Multi-Marketplace)",
             "Sandbox Targets (Falcons Prizm)",
             "Manual / Paste Comps (130point / eBay)",
             "eBay API (Pending Account Approval)",
@@ -621,13 +757,17 @@ if data_mode == "eBay API (Pending Account Approval)":
 live_records: list[dict] = []
 
 # Select Card & Listing Condition
-if data_mode == "Live Sold Comps (The Card API)":
+if data_mode in (
+    "Live Sold Comps (CompSniper + The Card API)",
+    "CompSniper Live (eBay Sold — 240/call)",
+    "The Card API Live (Multi-Marketplace)",
+):
     col_search, col_cond = st.columns([2.2, 1])
     with col_search:
         selected_card_title = st.text_input(
             "Search Any Card (Include Card # like '305' for Exact Base/Parallel Match)",
             value="2023 Prizm Bijan Robinson Silver 305",
-            help="Tip: Include the card number (e.g. 305) so cheap inserts don't mix in with True Silvers.",
+            help="Tip: Keep keywords short (year + set + player + parallel + card #) so cheap inserts don't mix in.",
         )
     with col_cond:
         detected_condition = st.selectbox(
@@ -652,29 +792,65 @@ if data_mode == "Live Sold Comps (The Card API)":
         )
     with fcol3:
         include_bo_flag = st.checkbox(
-            "Include Best Offer (Listed Ask) Sales",
+            "Include Best Offer Sales",
             value=True,
-            help="Includes Best Offer sales using their listed asking price when exact offer price is hidden.",
+            help="CompSniper returns the actual accepted Best Offer price; The Card API uses the listed ask when hidden.",
         )
+
+    cs_key = get_secret_key("COMPSNIPER_API_KEY")
+    tca_key = get_secret_key("THECARDAPI_KEY")
+
+    merged_records: list[dict] = []
+    seen_ids: set[str] = set()
+    errors: list[str] = []
 
     with st.spinner(f"Pulling live verified sold comps & card photos for '{selected_card_title}'..."):
-        live_res = fetch_live_cardapi_comps(
-            selected_card_title,
-            DEFAULT_TCA_KEY,
-            exclude_inserts=exclude_inserts_flag,
-            auto_filter=auto_filter_mode,
-            include_best_offer_ask=include_bo_flag,
-            limit=100,
-        )
+        if data_mode in ("Live Sold Comps (CompSniper + The Card API)", "CompSniper Live (eBay Sold — 240/call)"):
+            cs_res = fetch_live_compsniper_comps(
+                selected_card_title,
+                cs_key,
+                exclude_inserts=exclude_inserts_flag,
+                auto_filter=auto_filter_mode,
+                include_best_offer=include_bo_flag,
+            )
+            if cs_res["ok"]:
+                for r in cs_res["records"]:
+                    item_id = r.get("_item_id") or r["Listing Title"]
+                    if item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        merged_records.append(r)
+            elif cs_res["error"]:
+                errors.append(f"CompSniper: {cs_res['error']}")
 
-    live_records = live_res["records"]
+        if data_mode in ("Live Sold Comps (CompSniper + The Card API)", "The Card API Live (Multi-Marketplace)"):
+            tca_res = fetch_live_cardapi_comps(
+                selected_card_title,
+                tca_key,
+                exclude_inserts=exclude_inserts_flag,
+                auto_filter=auto_filter_mode,
+                include_best_offer_ask=include_bo_flag,
+                limit=100,
+            )
+            if tca_res["ok"]:
+                for r in tca_res["records"]:
+                    item_id = r.get("_item_id") or r["Listing Title"]
+                    if item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        merged_records.append(r)
+            elif tca_res["error"]:
+                errors.append(f"The Card API: {tca_res['error']}")
+
+    merged_records.sort(key=lambda r: r.get("Sale Date", ""), reverse=True)
+    live_records = merged_records
     card_sales_data = {"Raw": [], "PSA 10": [], "PSA 9": [], "BGS 9.5": [], "SGC 10": []}
 
-    if not live_res["ok"]:
-        st.error(f"Live Sold Comps Lookup Error: {live_res['error']}")
+    if errors and not live_records:
+        st.error(" | ".join(errors))
     elif not live_records:
         st.warning("No matching sales found with the current filters. Try broadening your search or toggling the Autograph Filter.")
     else:
+        if errors:
+            st.caption(f"⚠️ Partial source warning: {' | '.join(errors)}")
         with st.expander(
             f"🖼️ Visual Card Photos & Comp Filter ({len(live_records)} Verified Sales Matched — Uncheck Any Wrong Card)",
             expanded=True,
@@ -691,29 +867,35 @@ if data_mode == "Live Sold Comps (The Card API)":
                             f"<div style='font-size:0.76rem; line-height:1.25; text-align:center;'>"
                             f"<b style='color:#4ade80;'>\\${rec['Sold Price ($)']:,.2f}</b> &bull; "
                             f"<span style='color:#c084fc;font-weight:700;'>{rec['Condition']}</span><br/>"
-                            f"<span style='color:#94a3b8;'>{rec['Sale Date']}</span></div>",
+                            f"<span style='color:#94a3b8;'>{rec['Sale Date']} ({rec.get('Source', '')})</span></div>",
                             unsafe_allow_html=True,
                         )
 
-            st.caption("☑️ **Uncheck `Include` on any outlier or wrong card below to instantly recalculate Tier 1 & Tier 2:**")
-            df_editor = pd.DataFrame(live_records)
+            st.caption("☑️ **Uncheck `Include` on any outlier, or click `Grade` to re-assign a mislabeled card:**")
+            display_records = [{k: v for k, v in r.items() if k != "_item_id"} for r in live_records]
+            df_editor = pd.DataFrame(display_records)
             edited_df = st.data_editor(
                 df_editor,
                 width="stretch",
                 hide_index=True,
-                disabled=["Photo", "Condition", "Sold Price ($)", "Sale Date", "Card #", "Type", "Listing Title", "Link"],
+                disabled=["Photo", "Sold Price ($)", "Sale Date", "Card #", "Source", "Type", "Listing Title", "Link"],
                 column_config={
                     "Include": st.column_config.CheckboxColumn("Include ✅", default=True),
                     "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
-                    "Condition": st.column_config.TextColumn("Grade"),
+                    "Condition": st.column_config.SelectboxColumn(
+                        "Grade (Editable)",
+                        options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10", "Other Slab"],
+                        required=True,
+                    ),
                     "Sold Price ($)": st.column_config.NumberColumn("Sold Price", format="$%.2f"),
                     "Sale Date": st.column_config.TextColumn("Date Sold"),
                     "Card #": st.column_config.TextColumn("Card #"),
+                    "Source": st.column_config.TextColumn("API Source"),
                     "Type": st.column_config.TextColumn("Sale Type"),
                     "Listing Title": st.column_config.TextColumn("Listing Title", width="large"),
                     "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
                 },
-                key=f"comp_editor_{selected_card_title}_{auto_filter_mode}_{exclude_inserts_flag}_{include_bo_flag}",
+                key=f"comp_editor_v3_{data_mode}_{selected_card_title}_{auto_filter_mode}_{exclude_inserts_flag}_{include_bo_flag}",
             )
 
             for _, row in edited_df.iterrows():
