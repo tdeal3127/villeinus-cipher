@@ -757,6 +757,80 @@ def fetch_live_compsniper_comps(
         }
 
 
+@st.cache_data(ttl=6600, show_spinner=False)
+def get_ebay_token(app_id: str, cert_id: str) -> str:
+    """OAuth client-credentials token for eBay Browse API (valid ~2h)."""
+    import base64
+
+    cred = base64.b64encode(f"{app_id}:{cert_id}".encode()).decode()
+    r = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={"Authorization": f"Basic {cred}", "Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"},
+        timeout=20,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"eBay auth failed (HTTP {r.status_code}). Check EBAY_APP_ID / EBAY_CERT_ID secrets.")
+    return r.json()["access_token"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_ebay_active_listings(query: str, app_id: str, cert_id: str, sort: str, buy_type: str) -> dict:
+    """Active eBay listings via the Browse API (asking prices, not sold)."""
+    if not query.strip():
+        return {"ok": False, "error": "Enter a search.", "records": []}
+    if not app_id or not cert_id:
+        return {"ok": False, "error": "Missing EBAY_APP_ID / EBAY_CERT_ID in secrets.", "records": []}
+    try:
+        token = get_ebay_token(app_id, cert_id)
+        params = {"q": query.strip(), "limit": 100, "category_ids": "261328"}
+        if sort.startswith("Price"):
+            params["sort"] = "price"
+        elif sort == "Newly Listed":
+            params["sort"] = "newlyListed"
+        filters = []
+        if buy_type == "Buy It Now only":
+            filters.append("buyingOptions:{FIXED_PRICE}")
+        elif buy_type == "Auction only":
+            filters.append("buyingOptions:{AUCTION}")
+        if filters:
+            params["filter"] = ",".join(filters)
+        r = requests.get(
+            "https://api.ebay.com/buy/browse/v1/item_summary/search",
+            headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"},
+            params=params,
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return {"ok": False, "error": f"eBay Browse HTTP {r.status_code}: {r.text[:150]}", "records": []}
+        records = []
+        for it in r.json().get("itemSummaries", []):
+            try:
+                price = float(it["price"]["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            ship = None
+            opts = it.get("shippingOptions") or []
+            if opts:
+                try:
+                    ship = float(opts[0]["shippingCost"]["value"])
+                except (KeyError, TypeError, ValueError):
+                    ship = None
+            records.append(
+                {
+                    "Photo": (it.get("thumbnailImages") or [{}])[0].get("imageUrl") or (it.get("image") or {}).get("imageUrl", ""),
+                    "Price ($)": price,
+                    "Ship ($)": ship,
+                    "Type": "/".join(it.get("buyingOptions") or []),
+                    "Title": it.get("title", ""),
+                    "Link": it.get("itemWebUrl", ""),
+                }
+            )
+        return {"ok": True, "error": "", "records": records}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "records": []}
+
+
 # ---------------------------------------------------------------------------
 # Restricted Underground Vault PIN Gate (PIN: 3127 or Token Handoff)
 # ---------------------------------------------------------------------------
@@ -858,7 +932,7 @@ with st.sidebar:
             "The Card API Live (Multi-Marketplace)",
             "Sandbox Targets (Falcons Prizm)",
             "Manual / Paste Comps (130point / eBay)",
-            "eBay API (Pending Account Approval)",
+            "eBay Live Listings (Active — Browse API)",
         ],
         index=0,
     )
@@ -923,18 +997,43 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if data_mode == "eBay API (Pending Account Approval)":
+if data_mode == "eBay Live Listings (Active — Browse API)":
     st.info(
-        "⏳ **eBay Developer API Status: Holding Pattern**\n\n"
-        "Once your eBay Developer account is approved, drop your **App ID (Client ID)** and "
-        "**Cert ID (Client Secret)** below and The Cipher will pull 30-day settled comps automatically. "
-        "In the meantime, switch the sidebar to **Sandbox Targets** or **Manual / Paste Comps** to run deals right now!"
+        "🟢 **eBay Browse API connected.** Shows what's **currently for sale** (asking prices, not sold prices). "
+        "Compare these against your sold comps to spot underpriced cards."
     )
-    col_key1, col_key2 = st.columns(2)
-    with col_key1:
-        st.text_input("eBay App ID (Client ID)", placeholder="Pending eBay approval...", disabled=True)
-    with col_key2:
-        st.text_input("eBay Cert ID (Client Secret)", type="password", placeholder="Pending eBay approval...", disabled=True)
+    ebay_query = st.text_input("Search eBay Active Listings", value="2023 Prizm Bijan Robinson Silver 305")
+    lc1, lc2 = st.columns(2)
+    with lc1:
+        ebay_sort = st.selectbox("Sort", ["Price + Shipping: Lowest First", "Newly Listed", "Best Match"])
+    with lc2:
+        ebay_buy_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"])
+    el = fetch_ebay_active_listings(
+        ebay_query,
+        get_secret_key("EBAY_APP_ID"),
+        get_secret_key("EBAY_CERT_ID"),
+        ebay_sort,
+        ebay_buy_type,
+    )
+    if not el["ok"]:
+        st.error(el["error"])
+    elif not el["records"]:
+        st.warning("No active listings found.")
+    else:
+        ebay_df = pd.DataFrame(el["records"])
+        st.caption(f"{len(ebay_df)} active listings")
+        st.dataframe(
+            ebay_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
+                "Price ($)": st.column_config.NumberColumn("Price", format="$%.2f"),
+                "Ship ($)": st.column_config.NumberColumn("Shipping", format="$%.2f"),
+                "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
+                "Title": st.column_config.TextColumn("Title", width="large"),
+            },
+        )
     st.stop()
 
 live_records: list[dict] = []
