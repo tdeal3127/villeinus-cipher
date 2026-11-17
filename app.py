@@ -1190,6 +1190,26 @@ DEAL_TABLE_CONFIG = {
 }
 
 
+def render_marketplace_links(query: str) -> None:
+    """1-click external search links for active asking prices on COMC, Mercari, Fanatics Collect, and MySlabs."""
+    from urllib.parse import quote_plus
+
+    q_clean = query.strip()
+    if not q_clean:
+        return
+    enc = quote_plus(q_clean)
+    st.caption("🌐 **1-Click Cross-Check Active Listings:**")
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.link_button("COMC ↗", f"https://www.comc.com/Cards,sr,={enc}", use_container_width=True)
+    with m2:
+        st.link_button("Mercari ↗", f"https://www.mercari.com/search/?keyword={enc}", use_container_width=True)
+    with m3:
+        st.link_button("Fanatics Collect ↗", f"https://www.fanaticscollect.com/marketplace?q={enc}", use_container_width=True)
+    with m4:
+        st.link_button("MySlabs ↗", f"https://www.myslabs.com/search/all/?q={enc}", use_container_width=True)
+
+
 live_records: list[dict] = []
 
 # ---------------------------------------------------------------------------
@@ -1850,6 +1870,7 @@ elif data_mode == "eBay Live Listings (Buy Side)":
     if not buy_query.strip():
         st.info("🔎 Enter a card above and press **Enter** (or click **⚡ Bijan Silver #305**) to load Tier 1 buy ceilings & live eBay listings. Blank by default so opening the app uses zero API tokens.")
     else:
+        render_marketplace_links(buy_query)
         with st.spinner("Pulling 30-day comps + live eBay listings..."):
             deal_res = build_deal_rows(buy_query, buy_excl, buy_auto, True, buy_auctions, buy_sort, buy_type)
 
@@ -1951,6 +1972,7 @@ elif data_mode == "Deal Finder":
                     key="df_t1_grade",
                 )
             render_tier1(sales_map[t1_card], t1_grade, t1_card)
+            render_marketplace_links(t1_card)
             st.markdown(
                 brand_heading(ICON_PATH_B, "Deal Finder Results", size_rem=1.22, icon_px=30),
                 unsafe_allow_html=True,
