@@ -2,6 +2,7 @@ import base64
 from pathlib import Path
 import re
 import pandas as pd
+import requests
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -197,14 +198,17 @@ SANDBOX_CARDS = {
 # Core Valuation & Friction Helper Functions
 # ---------------------------------------------------------------------------
 def compute_comp_stats(sales_list: list[float]) -> dict:
-    """Calculate count, 30-day median, and 25th-percentile conservative floor."""
+    """Calculate count, 30-day median, 30-day mean (average), 25th-percentile floor, high, and low."""
     if not sales_list:
-        return {"count": 0, "median": 0.0, "floor_25": 0.0}
+        return {"count": 0, "median": 0.0, "mean": 0.0, "floor_25": 0.0, "high": 0.0, "low": 0.0}
     series = pd.Series(sales_list, dtype=float)
     return {
         "count": int(series.count()),
         "median": float(series.median()),
+        "mean": float(series.mean()),
         "floor_25": float(series.quantile(0.25)),
+        "high": float(series.max()),
+        "low": float(series.min()),
     }
 
 
@@ -274,6 +278,197 @@ def parse_price_list(raw_text: str) -> list[float]:
     cleaned = raw_text.replace("$", "")
     matches = re.findall(r"\d+(?:\.\d+)?", cleaned)
     return [float(m) for m in matches if float(m) > 0]
+
+
+DEFAULT_TCA_KEY = "tca_6f95c35cabd6ad4af150e6ce10d6d119b5716c2cd3aadeaa"
+
+JUNK_TITLE_PATTERNS = re.compile(
+    r"\b(lot\s+of|card\s+lot|player\s+lot|team\s+lot|box\s+break|case\s+break|"
+    r"pick\s+your|you\s+pick|u\s+pick|digital\s+card|reprint|custom\s+card|novelty)\b",
+    re.IGNORECASE,
+)
+
+INSERT_AND_OTHER_SET_WORDS = [
+    "draft",
+    "flashback",
+    "emergent",
+    "portals",
+    "prizm break",
+    "fireworks",
+    "hype",
+    "prizmatic",
+    "instant impact",
+    "premier jersey",
+    "rookie gear",
+    "variation",
+    "select",
+    "mosaic",
+    "optic",
+    "donruss",
+    "rookies & stars",
+    "rookies and stars",
+    "chronicles",
+    "contenders",
+    "illusions",
+    "zenith",
+    "score",
+    "prestige",
+    "absolute",
+]
+
+AUTO_PATTERN = re.compile(r"\b(auto|autograph|autographs|signed|on-card\s+auto)\b", re.IGNORECASE)
+
+
+def classify_sale_condition(item: dict) -> str:
+    """Classify a sale record from The Card API into Raw, PSA 10, PSA 9, BGS 9.5, SGC 10, or Other Slab."""
+    grader = str(item.get("grader") or "").strip().upper()
+    grade_raw = str(item.get("grade") or "").strip()
+    title = str(item.get("title") or "").upper()
+
+    if grade_raw.endswith(".0"):
+        grade_raw = grade_raw[:-2]
+
+    if grader == "PSA" and grade_raw == "10":
+        return "PSA 10"
+    if grader == "PSA" and grade_raw == "9":
+        return "PSA 9"
+    if grader in ("BGS", "BVG", "BECKETT") and grade_raw == "9.5":
+        return "BGS 9.5"
+    if grader == "SGC" and grade_raw == "10":
+        return "SGC 10"
+    if grader and grade_raw:
+        return f"{grader} {grade_raw}"
+
+    # Fallback title inspection if grader/grade fields were null
+    if re.search(r"\bPSA\s*(?:GEM\s*MT\s*)?10\b", title):
+        return "PSA 10"
+    if re.search(r"\bPSA\s*(?:MINT\s*)?9\b", title):
+        return "PSA 9"
+    if re.search(r"\b(?:BGS|BECKETT)\s*9\.5\b", title):
+        return "BGS 9.5"
+    if re.search(r"\bSGC\s*(?:GEM\s*MT\s*)?10\b", title):
+        return "SGC 10"
+    if re.search(r"\b(?:PSA|BGS|SGC|CGC)\s+\d+(?:\.\d+)?\b", title):
+        return "Other Slab"
+
+    return "Raw"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_live_cardapi_comps(
+    query_str: str,
+    api_key: str,
+    exclude_inserts: bool = True,
+    auto_filter: str = "All",
+    include_best_offer_ask: bool = True,
+    limit: int = 100,
+) -> dict:
+    """Query The Card API (/api/v1/market/sales) and return structured records with photos."""
+    records: list[dict] = []
+
+    if not query_str.strip():
+        return {"ok": False, "error": "Enter a card search query.", "records": records, "total_matched": 0}
+
+    try:
+        resp = requests.get(
+            "https://thecardapi.com/api/v1/market/sales",
+            params={"q": query_str.strip(), "limit": limit},
+            headers={"x-market-api-key": api_key.strip(), "accept": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return {
+                "ok": False,
+                "error": f"API returned HTTP {resp.status_code}: {resp.text[:200]}",
+                "records": records,
+                "total_matched": 0,
+            }
+
+        payload = resp.json()
+        raw_items = payload.get("data", [])
+        total_matched = (payload.get("pagination") or {}).get("total", len(raw_items))
+
+        # Parse required search tokens so every word typed must appear in the listing title
+        raw_tokens = [t.strip().lower() for t in query_str.split() if t.strip()]
+        required_tokens = [t.lstrip("#") for t in raw_tokens if not t.startswith("-")]
+        excluded_tokens = [t[1:] for t in raw_tokens if t.startswith("-") and len(t) > 1]
+
+        for item in raw_items:
+            title = str(item.get("title") or "")
+            title_lower = title.lower()
+            if JUNK_TITLE_PATTERNS.search(title):
+                continue
+            if any(ex in title_lower for ex in excluded_tokens):
+                continue
+
+            # Auto-block inserts, variations, and other sets unless the user searched for them
+            if exclude_inserts:
+                blocked_by_insert = False
+                for w in INSERT_AND_OTHER_SET_WORDS:
+                    if w in title_lower and not any(w in req for req in required_tokens):
+                        blocked_by_insert = True
+                        break
+                if blocked_by_insert:
+                    continue
+
+            # Check Auto vs Non-Auto filter
+            is_auto = bool(AUTO_PATTERN.search(title))
+            if auto_filter == "Non-Auto Only" and is_auto:
+                continue
+            if auto_filter == "Autographs Only" and not is_auto:
+                continue
+
+            if not all(tok in title_lower for tok in required_tokens):
+                continue
+
+            price_val = item.get("price") if item.get("price") is not None else item.get("price_usd")
+            listing_type_raw = str(item.get("listing_type") or "")
+            if price_val is None and include_best_offer_ask and listing_type_raw == "best_offer":
+                price_val = item.get("original_price")
+
+            try:
+                price = float(price_val)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+
+            cond = classify_sale_condition(item)
+            ship_val = item.get("shipping_price")
+            ship_price = float(ship_val) if ship_val is not None else 0.0
+            img_url = str(item.get("thumbnail_url") or item.get("image_url") or "")
+
+            type_label = listing_type_raw.replace("_", " ").title()
+            if listing_type_raw == "best_offer" and item.get("price") is None:
+                type_label = "Best Offer (Ask)"
+
+            records.append(
+                {
+                    "Include": True,
+                    "Photo": img_url,
+                    "Condition": cond,
+                    "Sold Price ($)": price,
+                    "Sale Date": str(item.get("sale_date") or ""),
+                    "Card #": str(item.get("card_number") or ""),
+                    "Type": type_label,
+                    "Listing Title": title,
+                    "Link": str(item.get("listing_url") or ""),
+                }
+            )
+
+        return {
+            "ok": True,
+            "error": "",
+            "records": records,
+            "total_matched": total_matched,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "records": records,
+            "total_matched": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -358,11 +553,21 @@ with st.sidebar:
 
     target_roi_decimal = target_roi_pct / 100.0
 
+    valuation_anchor_mode = st.radio(
+        "Primary Valuation Anchor",
+        options=["30-Day Median (Spec Default)", "30-Day Average (Mean)"],
+        index=0,
+        help="Median picks the exact middle sale price (ignores extreme outliers). Average (Mean) adds all sales and divides by count (moves immediately whenever high/low sales are unchecked).",
+    )
+    anchor_key = "mean" if "Average" in valuation_anchor_mode else "median"
+    anchor_label = "Average" if anchor_key == "mean" else "Median"
+
     st.divider()
     st.subheader("2. Data Source Mode")
     data_mode = st.radio(
         "30-Day Comps Source",
         options=[
+            "Live Sold Comps (The Card API)",
             "Sandbox Targets (Falcons Prizm)",
             "Manual / Paste Comps (130point / eBay)",
             "eBay API (Pending Account Approval)",
@@ -413,8 +618,121 @@ if data_mode == "eBay API (Pending Account Approval)":
         st.text_input("eBay Cert ID (Client Secret)", type="password", placeholder="Pending eBay approval...", disabled=True)
     st.stop()
 
+live_records: list[dict] = []
+
 # Select Card & Listing Condition
-if data_mode == "Sandbox Targets (Falcons Prizm)":
+if data_mode == "Live Sold Comps (The Card API)":
+    col_search, col_cond = st.columns([2.2, 1])
+    with col_search:
+        selected_card_title = st.text_input(
+            "Search Any Card (Include Card # like '305' for Exact Base/Parallel Match)",
+            value="2023 Prizm Bijan Robinson Silver 305",
+            help="Tip: Include the card number (e.g. 305) so cheap inserts don't mix in with True Silvers.",
+        )
+    with col_cond:
+        detected_condition = st.selectbox(
+            "Listing Condition (Auto-Routes Evaluation Path)",
+            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
+            index=0,
+        )
+
+    fcol1, fcol2, fcol3 = st.columns([1.3, 1.4, 1.3])
+    with fcol1:
+        auto_filter_mode = st.selectbox(
+            "Autograph Filter",
+            options=["Non-Auto Only", "Autographs Only", "All"],
+            index=0,
+            help="Separates True Silver Non-Autos from True Silver Autographs that share the same card #.",
+        )
+    with fcol2:
+        exclude_inserts_flag = st.checkbox(
+            "Block Inserts, Variations & Other Sets",
+            value=True,
+            help="Automatically filters out Flashback, Emergent, Variation, Relic/Jersey, Select, Mosaic, and Draft Picks.",
+        )
+    with fcol3:
+        include_bo_flag = st.checkbox(
+            "Include Best Offer (Listed Ask) Sales",
+            value=True,
+            help="Includes Best Offer sales using their listed asking price when exact offer price is hidden.",
+        )
+
+    with st.spinner(f"Pulling live verified sold comps & card photos for '{selected_card_title}'..."):
+        live_res = fetch_live_cardapi_comps(
+            selected_card_title,
+            DEFAULT_TCA_KEY,
+            exclude_inserts=exclude_inserts_flag,
+            auto_filter=auto_filter_mode,
+            include_best_offer_ask=include_bo_flag,
+            limit=100,
+        )
+
+    live_records = live_res["records"]
+    card_sales_data = {"Raw": [], "PSA 10": [], "PSA 9": [], "BGS 9.5": [], "SGC 10": []}
+
+    if not live_res["ok"]:
+        st.error(f"Live Sold Comps Lookup Error: {live_res['error']}")
+    elif not live_records:
+        st.warning("No matching sales found with the current filters. Try broadening your search or toggling the Autograph Filter.")
+    else:
+        with st.expander(
+            f"🖼️ Visual Card Photos & Comp Filter ({len(live_records)} Verified Sales Matched — Uncheck Any Wrong Card)",
+            expanded=True,
+        ):
+            # Visual Card Photo Strip (Top 6 Sales with Images)
+            photo_records = [r for r in live_records if r.get("Photo")][:6]
+            if photo_records:
+                st.caption("📸 **Recent Sold Card Photos (Visual Verification):**")
+                pcols = st.columns(len(photo_records))
+                for idx, rec in enumerate(photo_records):
+                    with pcols[idx]:
+                        st.image(rec["Photo"], width="stretch")
+                        st.markdown(
+                            f"<div style='font-size:0.76rem; line-height:1.25; text-align:center;'>"
+                            f"<b style='color:#4ade80;'>\\${rec['Sold Price ($)']:,.2f}</b> &bull; "
+                            f"<span style='color:#c084fc;font-weight:700;'>{rec['Condition']}</span><br/>"
+                            f"<span style='color:#94a3b8;'>{rec['Sale Date']}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+
+            st.caption("☑️ **Uncheck `Include` on any outlier or wrong card below to instantly recalculate Tier 1 & Tier 2:**")
+            df_editor = pd.DataFrame(live_records)
+            edited_df = st.data_editor(
+                df_editor,
+                width="stretch",
+                hide_index=True,
+                disabled=["Photo", "Condition", "Sold Price ($)", "Sale Date", "Card #", "Type", "Listing Title", "Link"],
+                column_config={
+                    "Include": st.column_config.CheckboxColumn("Include ✅", default=True),
+                    "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
+                    "Condition": st.column_config.TextColumn("Grade"),
+                    "Sold Price ($)": st.column_config.NumberColumn("Sold Price", format="$%.2f"),
+                    "Sale Date": st.column_config.TextColumn("Date Sold"),
+                    "Card #": st.column_config.TextColumn("Card #"),
+                    "Type": st.column_config.TextColumn("Sale Type"),
+                    "Listing Title": st.column_config.TextColumn("Listing Title", width="large"),
+                    "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
+                },
+                key=f"comp_editor_{selected_card_title}_{auto_filter_mode}_{exclude_inserts_flag}_{include_bo_flag}",
+            )
+
+            for _, row in edited_df.iterrows():
+                if row["Include"] and row["Condition"] in card_sales_data:
+                    card_sales_data[row["Condition"]].append(float(row["Sold Price ($)"]))
+
+            r_c = len(card_sales_data["Raw"])
+            r_avg = pd.Series(card_sales_data["Raw"], dtype=float).mean() if r_c else 0.0
+            r_med = pd.Series(card_sales_data["Raw"], dtype=float).median() if r_c else 0.0
+            p10_c = len(card_sales_data["PSA 10"])
+            p10_avg = pd.Series(card_sales_data["PSA 10"], dtype=float).mean() if p10_c else 0.0
+            p10_med = pd.Series(card_sales_data["PSA 10"], dtype=float).median() if p10_c else 0.0
+            st.info(
+                f"📊 **Live Checked Selection Stats:** "
+                f"**Raw ({r_c} checked):** Average `${r_avg:,.2f}` | Median `${r_med:,.2f}` &nbsp;&bull;&nbsp; "
+                f"**PSA 10 ({p10_c} checked):** Average `${p10_avg:,.2f}` | Median `${p10_med:,.2f}`"
+            )
+
+elif data_mode == "Sandbox Targets (Falcons Prizm)":
     col_card, col_cond = st.columns([2.2, 1])
     with col_card:
         selected_card_title = st.selectbox(
@@ -592,19 +910,19 @@ if detected_condition == "Raw":
     )
 
     path_a = evaluate_standard_path(
-        median_price=raw_stats["median"],
+        median_price=raw_stats[anchor_key],
         floor_price=raw_stats["floor_25"],
         target_roi_decimal=target_roi_decimal,
         include_grading=False,
     )
     path_b = evaluate_standard_path(
-        median_price=psa10_stats["median"],
+        median_price=psa10_stats[anchor_key],
         floor_price=psa10_stats["floor_25"],
         target_roi_decimal=target_roi_decimal,
         include_grading=True,
     )
     bailout_9 = evaluate_psa9_bailout(
-        psa9_median=psa9_stats["median"],
+        psa9_median=psa9_stats[anchor_key],
         path_b_max_buy=path_b["max_buy"],
     )
 
@@ -620,7 +938,7 @@ if detected_condition == "Raw":
             st.caption("Buy Raw -> Sell Raw (Bypasses $47 PSA grading fee)")
 
             m1, m2 = st.columns(2)
-            m1.metric("30-Day Raw Median", f"${path_a['median']:,.2f}")
+            m1.metric(f"30-Day Raw {anchor_label}", f"${path_a['median']:,.2f}")
             m2.metric("25th-Pct Conservative Floor", f"${path_a['floor_25']:,.2f}")
 
             m3, m4 = st.columns(2)
@@ -633,10 +951,20 @@ if detected_condition == "Raw":
 
             # TIER 2 — Clickable Arithmetic Breakdown (Path A)
             with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path A)"):
+                st.markdown("#### 0. 30-Day Raw Sales Range (High / Average / Median / Floor / Low)")
+                st.markdown(
+                    f"""
+                    - **30-Day High Sale:** **\\${raw_stats['high']:,.2f}**
+                    - **30-Day Average (Mean):** **\\${raw_stats['mean']:,.2f}**
+                    - **30-Day Median (Middle Sale):** **\\${raw_stats['median']:,.2f}** ({raw_stats['count']} sales)
+                    - **25th-Percentile Conservative Floor:** **\\${path_a['floor_25']:,.2f}**
+                    - **30-Day Low Sale:** **\\${raw_stats['low']:,.2f}**
+                    """
+                )
                 st.markdown("#### 1. Net Payout & Max Buy Price Math")
                 st.markdown(
                     f"""
-                    - **30-Day Raw Median Anchor:** \\${path_a['median']:,.2f} ({raw_stats['count']} sales)
+                    - **30-Day Raw {anchor_label} Anchor:** \\${path_a['median']:,.2f} ({raw_stats['count']} sales)
                     - **Less eBay Final Value Fee (13.25%):** -\\${path_a['ebay_fee_median']:,.2f}
                     - **Less Outbound Bubble Mailer & Supplies:** -\\${path_a['shipping_cost']:,.2f}
                     - **Equals Net Payout:** **\\${path_a['net_payout']:,.2f}**
@@ -665,7 +993,7 @@ if detected_condition == "Raw":
             st.caption("Buy Raw -> Grade with PSA ($47.00 all-in) -> Sell PSA 10")
 
             b1, b2 = st.columns(2)
-            b1.metric("30-Day PSA 10 Median", f"${path_b['median']:,.2f}")
+            b1.metric(f"30-Day PSA 10 {anchor_label}", f"${path_b['median']:,.2f}")
             b2.metric("25th-Pct Conservative Floor", f"${path_b['floor_25']:,.2f}")
 
             b3, b4 = st.columns(2)
@@ -682,7 +1010,7 @@ if detected_condition == "Raw":
                 unsafe_allow_html=True,
             )
             bail_col1, bail_col2, bail_col3 = st.columns(3)
-            bail_col1.metric("30-Day PSA 9 Median", f"${bailout_9['psa9_median']:,.2f}")
+            bail_col1.metric(f"30-Day PSA 9 {anchor_label}", f"${bailout_9['psa9_median']:,.2f}")
             bail_col2.metric(
                 "PSA 9 Net Profit / Loss",
                 f"${bailout_9['bailout_profit_loss']:+,.2f}",
@@ -697,10 +1025,17 @@ if detected_condition == "Raw":
 
             # TIER 2 — Clickable Arithmetic Breakdown (Path B)
             with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path B)"):
+                st.markdown("#### 0. 30-Day Graded Sales Range (PSA 10 & PSA 9 High / Avg / Median / Low)")
+                st.markdown(
+                    f"""
+                    - **PSA 10 ({psa10_stats['count']} sales):** High **\\${psa10_stats['high']:,.2f}** &nbsp;|&nbsp; Avg **\\${psa10_stats['mean']:,.2f}** &nbsp;|&nbsp; Median **\\${psa10_stats['median']:,.2f}** &nbsp;|&nbsp; 25th-Pct Floor **\\${path_b['floor_25']:,.2f}** &nbsp;|&nbsp; Low **\\${psa10_stats['low']:,.2f}**
+                    - **PSA 9 ({psa9_stats['count']} sales):** High **\\${psa9_stats['high']:,.2f}** &nbsp;|&nbsp; Avg **\\${psa9_stats['mean']:,.2f}** &nbsp;|&nbsp; Median **\\${psa9_stats['median']:,.2f}** &nbsp;|&nbsp; 25th-Pct Floor **\\${psa9_stats['floor_25']:,.2f}** &nbsp;|&nbsp; Low **\\${psa9_stats['low']:,.2f}**
+                    """
+                )
                 st.markdown("#### 1. PSA 10 Net Payout & Max Buy Price Math")
                 st.markdown(
                     f"""
-                    - **30-Day PSA 10 Median Anchor:** \\${path_b['median']:,.2f} ({psa10_stats['count']} sales)
+                    - **30-Day PSA 10 {anchor_label} Anchor:** \\${path_b['median']:,.2f} ({psa10_stats['count']} sales)
                     - **Less eBay Final Value Fee (13.25%):** -\\${path_b['ebay_fee_median']:,.2f}
                     - **Less Outbound Bubble Mailer & Supplies:** -\\${path_b['shipping_cost']:,.2f}
                     - **Less PSA All-In Grading Cost:** -\\${path_b['grading_cost']:,.2f} (\\$39.99 Value + \\$7.01 insured ship/prep)
@@ -746,7 +1081,7 @@ else:
     )
 
     path_c = evaluate_standard_path(
-        median_price=slab_stats["median"],
+        median_price=slab_stats[anchor_key],
         floor_price=slab_stats["floor_25"],
         target_roi_decimal=target_roi_decimal,
         include_grading=False,
@@ -760,7 +1095,7 @@ else:
         st.caption(f"Buy {detected_condition} Slab -> Sell {detected_condition} Slab (Grading cost bypassed: $0.00)")
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric(f"30-Day {detected_condition} Median", f"${path_c['median']:,.2f}")
+        c1.metric(f"30-Day {detected_condition} {anchor_label}", f"${path_c['median']:,.2f}")
         c2.metric("25th-Pct Conservative Floor", f"${path_c['floor_25']:,.2f}")
         c3.metric("Net Payout (After Fees/Ship)", f"${path_c['net_payout']:,.2f}")
         c4.metric(
@@ -771,10 +1106,20 @@ else:
 
         # TIER 2 — Clickable Arithmetic Breakdown (Path C)
         with st.expander(f"➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path C: {detected_condition})"):
+            st.markdown(f"#### 0. 30-Day {detected_condition} Sales Range (High / Average / Median / Floor / Low)")
+            st.markdown(
+                f"""
+                - **30-Day High Sale:** **\\${slab_stats['high']:,.2f}**
+                - **30-Day Average (Mean):** **\\${slab_stats['mean']:,.2f}**
+                - **30-Day Median (Middle Sale):** **\\${slab_stats['median']:,.2f}** ({slab_stats['count']} sales)
+                - **25th-Percentile Conservative Floor:** **\\${path_c['floor_25']:,.2f}**
+                - **30-Day Low Sale:** **\\${slab_stats['low']:,.2f}**
+                """
+            )
             st.markdown("#### 1. Net Payout & Max Buy Price Math")
             st.markdown(
                 f"""
-                - **30-Day {detected_condition} Median Anchor:** \\${path_c['median']:,.2f} ({slab_stats['count']} sales)
+                - **30-Day {detected_condition} {anchor_label} Anchor:** \\${path_c['median']:,.2f} ({slab_stats['count']} sales)
                 - **Less eBay Final Value Fee (13.25%):** -\\${path_c['ebay_fee_median']:,.2f}
                 - **Less Outbound Bubble Mailer & Supplies:** -\\${path_c['shipping_cost']:,.2f}
                 - **Grading Cost:** \\$0.00 (Already slabbed)
