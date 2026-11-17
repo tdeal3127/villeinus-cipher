@@ -892,7 +892,7 @@ with st.sidebar:
 
     st.subheader("1. Margin Control")
     if "target_roi_pct" not in st.session_state:
-        st.session_state.target_roi_pct = 25
+        st.session_state.target_roi_pct = 10
 
     def _step_roi(delta: int) -> None:
         st.session_state.target_roi_pct = max(5, min(100, st.session_state.target_roi_pct + delta))
@@ -927,12 +927,10 @@ with st.sidebar:
     data_mode = st.radio(
         "30-Day Comps Source",
         options=[
-            "Live Sold Comps (CompSniper + The Card API)",
-            "CompSniper Live (eBay Sold — 240/call)",
-            "The Card API Live (Multi-Marketplace)",
-            "Sandbox Targets (Falcons Prizm)",
-            "Manual / Paste Comps (130point / eBay)",
-            "eBay Live Listings (Active — Browse API)",
+            "Live Sold Comps",
+            "eBay Live Listings (Buy Side)",
+            "Deal Finder",
+            "Manual / Paste Comps",
         ],
         index=0,
     )
@@ -997,290 +995,198 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if data_mode == "eBay Live Listings (Active — Browse API)":
-    st.info(
-        "🟢 **eBay Browse API connected.** Shows what's **currently for sale** (asking prices, not sold prices). "
-        "Compare these against your sold comps to spot underpriced cards."
-    )
-    ebay_query = st.text_input("Search eBay Active Listings", value="2023 Prizm Bijan Robinson Silver 305")
-    lc1, lc2 = st.columns(2)
-    with lc1:
-        ebay_sort = st.selectbox("Sort", ["Price + Shipping: Lowest First", "Newly Listed", "Best Match"])
-    with lc2:
-        ebay_buy_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"])
-    el = fetch_ebay_active_listings(
-        ebay_query,
-        get_secret_key("EBAY_APP_ID"),
-        get_secret_key("EBAY_CERT_ID"),
-        ebay_sort,
-        ebay_buy_type,
-    )
-    if not el["ok"]:
-        st.error(el["error"])
-    elif not el["records"]:
-        st.warning("No active listings found.")
-    else:
-        ebay_df = pd.DataFrame(el["records"])
-        st.caption(f"{len(ebay_df)} active listings")
-        st.dataframe(
-            ebay_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
-                "Price ($)": st.column_config.NumberColumn("Price", format="$%.2f"),
-                "Ship ($)": st.column_config.NumberColumn("Shipping", format="$%.2f"),
-                "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
-                "Title": st.column_config.TextColumn("Title", width="large"),
-            },
-        )
-    st.stop()
-
-live_records: list[dict] = []
-
-# Select Card & Listing Condition
-if data_mode in (
-    "Live Sold Comps (CompSniper + The Card API)",
-    "CompSniper Live (eBay Sold — 240/call)",
-    "The Card API Live (Multi-Marketplace)",
-):
-    col_search, col_cond = st.columns([2.2, 1])
-    with col_search:
-        selected_card_title = st.text_input(
-            "Search Any Card (Include Card # like '305' for Exact Base/Parallel Match)",
-            value="2023 Prizm Bijan Robinson Silver 305",
-            help="Tip: Keep keywords short (year + set + player + parallel + card #) so cheap inserts don't mix in.",
-        )
-    with col_cond:
-        detected_condition = st.selectbox(
-            "Listing Condition (Auto-Routes Evaluation Path)",
-            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
-            index=0,
-        )
-
-    fcol1, fcol2, fcol3, fcol4 = st.columns([1.2, 1.3, 1.1, 1.4])
-    with fcol1:
-        auto_filter_mode = st.selectbox(
-            "Autograph Filter",
-            options=["Non-Auto Only", "Autographs Only", "All"],
-            index=0,
-            help="Separates True Silver Non-Autos from True Silver Autographs that share the same card #.",
-        )
-    with fcol2:
-        exclude_inserts_flag = st.checkbox(
-            "Block Inserts, Variations & Other Sets",
-            value=True,
-            help="Automatically filters out Flashback, Emergent, Variation, Relic/Jersey, Select, Mosaic, and Draft Picks.",
-        )
-    with fcol3:
-        include_bo_flag = st.checkbox(
-            "Include Best Offer Sales",
-            value=True,
-            help="CompSniper returns the actual accepted Best Offer price; The Card API uses the listed ask when hidden.",
-        )
-    with fcol4:
-        include_auctions_flag = st.checkbox(
-            "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
-            value=True,
-            help="Pulls verified graded card sales (with Buyer's Premium included) from Goldin, Fanatics Collect, MySlabs, and Pristine.",
-        )
-
-    cs_key = get_secret_key("COMPSNIPER_API_KEY")
-    tca_key = get_secret_key("THECARDAPI_KEY")
-
-    merged_records: list[dict] = []
-    seen_ids: set[str] = set()
+# ---------------------------------------------------------------------------
+# Shared Comp + Listing Helpers (used by Comps, Buy Side & Deal Finder modes)
+# ---------------------------------------------------------------------------
+def gather_merged_comps(
+    query: str,
+    cs_key: str,
+    tca_key: str,
+    exclude_inserts: bool,
+    auto_filter: str,
+    include_bo: bool,
+    include_auctions: bool,
+) -> tuple[list[dict], list[str]]:
+    """Merge CompSniper (eBay) + graded auction houses + The Card API, de-duplicated by item id."""
+    merged: list[dict] = []
+    seen: set[str] = set()
     errors: list[str] = []
 
-    with st.spinner(f"Pulling live verified sold comps & card photos for '{selected_card_title}'..."):
-        if data_mode in ("Live Sold Comps (CompSniper + The Card API)", "CompSniper Live (eBay Sold — 240/call)"):
-            cs_res = fetch_live_compsniper_comps(
-                selected_card_title,
-                cs_key,
-                exclude_inserts=exclude_inserts_flag,
-                auto_filter=auto_filter_mode,
-                include_best_offer=include_bo_flag,
-            )
-            if cs_res["ok"]:
-                for r in cs_res["records"]:
-                    item_id = r.get("_item_id") or r["Listing Title"]
-                    if item_id not in seen_ids:
-                        seen_ids.add(item_id)
-                        merged_records.append(r)
-            elif cs_res["error"]:
-                errors.append(f"CompSniper: {cs_res['error']}")
+    def _add(recs: list[dict]) -> None:
+        for r in recs:
+            item_id = r.get("_item_id") or r["Listing Title"]
+            if item_id not in seen:
+                seen.add(item_id)
+                merged.append(r)
 
-            if include_auctions_flag:
-                auc_res = fetch_live_graded_auctions(
-                    selected_card_title,
-                    cs_key,
-                    exclude_inserts=exclude_inserts_flag,
-                    auto_filter=auto_filter_mode,
-                )
-                if auc_res["ok"]:
-                    for r in auc_res["records"]:
-                        item_id = r.get("_item_id") or r["Listing Title"]
-                        if item_id not in seen_ids:
-                            seen_ids.add(item_id)
-                            merged_records.append(r)
+    cs_res = fetch_live_compsniper_comps(
+        query, cs_key, exclude_inserts=exclude_inserts, auto_filter=auto_filter, include_best_offer=include_bo
+    )
+    if cs_res["ok"]:
+        _add(cs_res["records"])
+    elif cs_res["error"]:
+        errors.append(f"CompSniper: {cs_res['error']}")
 
-        if data_mode in ("Live Sold Comps (CompSniper + The Card API)", "The Card API Live (Multi-Marketplace)"):
-            tca_res = fetch_live_cardapi_comps(
-                selected_card_title,
-                tca_key,
-                exclude_inserts=exclude_inserts_flag,
-                auto_filter=auto_filter_mode,
-                include_best_offer_ask=include_bo_flag,
-                limit=100,
-            )
-            if tca_res["ok"]:
-                for r in tca_res["records"]:
-                    item_id = r.get("_item_id") or r["Listing Title"]
-                    if item_id not in seen_ids:
-                        seen_ids.add(item_id)
-                        merged_records.append(r)
-            elif tca_res["error"]:
-                errors.append(f"The Card API: {tca_res['error']}")
+    if include_auctions:
+        auc_res = fetch_live_graded_auctions(query, cs_key, exclude_inserts=exclude_inserts, auto_filter=auto_filter)
+        if auc_res["ok"]:
+            _add(auc_res["records"])
 
-    merged_records.sort(key=lambda r: r.get("Sale Date", ""), reverse=True)
-    live_records = merged_records
-    card_sales_data = {"Raw": [], "PSA 10": [], "PSA 9": [], "BGS 9.5": [], "SGC 10": []}
+    tca_res = fetch_live_cardapi_comps(
+        query,
+        tca_key,
+        exclude_inserts=exclude_inserts,
+        auto_filter=auto_filter,
+        include_best_offer_ask=include_bo,
+        limit=100,
+    )
+    if tca_res["ok"]:
+        _add(tca_res["records"])
+    elif tca_res["error"]:
+        errors.append(f"The Card API: {tca_res['error']}")
 
-    if errors and not live_records:
-        st.error(" | ".join(errors))
-    elif not live_records:
-        st.warning("No matching sales found with the current filters. Try broadening your search or toggling the Autograph Filter.")
-    else:
-        if errors:
-            st.caption(f"⚠️ Partial source warning: {' | '.join(errors)}")
-        with st.expander(
-            f"🖼️ Visual Card Photos & Comp Filter ({len(live_records)} Verified Sales Matched — Uncheck Any Wrong Card)",
-            expanded=True,
-        ):
-            # Visual Card Photo Strip (Top 6 Sales with Images)
-            photo_records = [r for r in live_records if r.get("Photo")][:6]
-            if photo_records:
-                st.caption("📸 **Recent Sold Card Photos (Visual Verification):**")
-                pcols = st.columns(len(photo_records))
-                for idx, rec in enumerate(photo_records):
-                    with pcols[idx]:
-                        st.image(rec["Photo"], width="stretch")
-                        st.markdown(
-                            f"<div style='font-size:0.76rem; line-height:1.25; text-align:center;'>"
-                            f"<b style='color:#4ade80;'>\\${rec['Sold Price ($)']:,.2f}</b> &bull; "
-                            f"<span style='color:#c084fc;font-weight:700;'>{rec['Condition']}</span><br/>"
-                            f"<span style='color:#94a3b8;'>{rec['Sale Date']} ({rec.get('Source', '')})</span></div>",
-                            unsafe_allow_html=True,
-                        )
+    merged.sort(key=lambda r: r.get("Sale Date", ""), reverse=True)
+    return merged, errors
 
-            st.caption("☑️ **Uncheck `Include` on any outlier, or click `Grade` to re-assign a mislabeled card:**")
-            display_records = [{k: v for k, v in r.items() if k != "_item_id"} for r in live_records]
-            df_editor = pd.DataFrame(display_records)
-            edited_df = st.data_editor(
-                df_editor,
-                width="stretch",
-                hide_index=True,
-                disabled=["Photo", "Sold Price ($)", "Sale Date", "Card #", "Source", "Type", "Listing Title", "Link"],
-                column_config={
-                    "Include": st.column_config.CheckboxColumn("Include ✅", default=True),
-                    "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
-                    "Condition": st.column_config.SelectboxColumn(
-                        "Grade (Editable)",
-                        options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10", "Other Slab"],
-                        required=True,
-                    ),
-                    "Sold Price ($)": st.column_config.NumberColumn("Sold Price", format="$%.2f"),
-                    "Sale Date": st.column_config.TextColumn("Date Sold"),
-                    "Card #": st.column_config.TextColumn("Card #"),
-                    "Source": st.column_config.TextColumn("API Source"),
-                    "Type": st.column_config.TextColumn("Sale Type"),
-                    "Listing Title": st.column_config.TextColumn("Listing Title", width="large"),
-                    "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
-                },
-                key=f"comp_editor_v3_{data_mode}_{selected_card_title}_{auto_filter_mode}_{exclude_inserts_flag}_{include_bo_flag}",
-            )
 
-            for _, row in edited_df.iterrows():
-                if row["Include"] and row["Condition"] in card_sales_data:
-                    card_sales_data[row["Condition"]].append(float(row["Sold Price ($)"]))
+def title_passes_filters(title: str, query: str, exclude_inserts: bool, auto_filter: str) -> bool:
+    """Same relevance rules used on sold comps, applied to active listing titles."""
+    t = title.lower()
+    if JUNK_TITLE_PATTERNS.search(title):
+        return False
+    raw_tokens = [x.strip().lower() for x in query.split() if x.strip()]
+    required = [x.lstrip("#") for x in raw_tokens if not x.startswith("-")]
+    excluded = [x[1:] for x in raw_tokens if x.startswith("-") and len(x) > 1]
+    if any(ex in t for ex in excluded):
+        return False
+    if not all(tok in t for tok in required):
+        return False
+    if exclude_inserts:
+        for w in INSERT_AND_OTHER_SET_WORDS:
+            if w in t and not any(w in req for req in required):
+                return False
+    is_auto = bool(AUTO_PATTERN.search(title))
+    if auto_filter == "Non-Auto Only" and is_auto:
+        return False
+    if auto_filter == "Autographs Only" and not is_auto:
+        return False
+    return True
 
-            r_c = len(card_sales_data["Raw"])
-            r_avg = pd.Series(card_sales_data["Raw"], dtype=float).mean() if r_c else 0.0
-            r_med = pd.Series(card_sales_data["Raw"], dtype=float).median() if r_c else 0.0
-            p10_c = len(card_sales_data["PSA 10"])
-            p10_avg = pd.Series(card_sales_data["PSA 10"], dtype=float).mean() if p10_c else 0.0
-            p10_med = pd.Series(card_sales_data["PSA 10"], dtype=float).median() if p10_c else 0.0
-            st.info(
-                f"📊 **Live Checked Selection Stats:** "
-                f"**Raw ({r_c} checked):** Average `${r_avg:,.2f}` | Median `${r_med:,.2f}` &nbsp;&bull;&nbsp; "
-                f"**PSA 10 ({p10_c} checked):** Average `${p10_avg:,.2f}` | Median `${p10_med:,.2f}`"
-            )
 
-elif data_mode == "Sandbox Targets (Falcons Prizm)":
-    col_card, col_cond = st.columns([2.2, 1])
-    with col_card:
-        selected_card_title = st.selectbox(
-            "Select Target Card (Panini Prizm True Silver Auto Sandbox — Sample Comps)",
-            options=list(SANDBOX_CARDS.keys()),
-        )
-    with col_cond:
-        detected_condition = st.selectbox(
-            "Listing Condition (Auto-Routes Evaluation Path)",
-            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
-            index=0,
-        )
-    card_sales_data = SANDBOX_CARDS[selected_card_title]
-
-else:
-    # Manual / Paste Comps Mode so user can use the tool immediately before eBay API arrives
-    col_card, col_cond = st.columns([2.2, 1])
-    with col_card:
-        selected_card_title = st.text_input(
-            "Card Title / Listing Name",
-            value="2023 Panini Prizm Bijan Robinson True Silver Auto #305",
-        )
-    with col_cond:
-        detected_condition = st.selectbox(
-            "Listing Condition (Auto-Routes Evaluation Path)",
-            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
-            index=0,
-        )
-
-    st.markdown("##### Paste 30-Day Settled Sold Prices (comma or space separated)")
-    if detected_condition == "Raw":
-        mcol1, mcol2, mcol3 = st.columns(3)
-        with mcol1:
-            raw_input_str = st.text_area(
-                "30-Day Raw Sold Prices ($)",
-                value="155, 165, 170, 175, 180, 185, 195",
-                height=90,
-            )
-        with mcol2:
-            psa10_input_str = st.text_area(
-                "30-Day PSA 10 Sold Prices ($)",
-                value="390, 410, 425, 440, 460",
-                height=90,
-            )
-        with mcol3:
-            psa9_input_str = st.text_area(
-                "30-Day PSA 9 Sold Prices ($)",
-                value="200, 210, 215, 225, 235",
-                height=90,
-            )
-        card_sales_data = {
-            "Raw": parse_price_list(raw_input_str),
-            "PSA 10": parse_price_list(psa10_input_str),
-            "PSA 9": parse_price_list(psa9_input_str),
+def compute_ceilings(sales: dict, cond: str) -> dict:
+    """Max all-in buy ceilings for a listing of a given grade, from the 30-day comps."""
+    if cond == "Raw":
+        raw = compute_comp_stats(sales.get("Raw", []))
+        p10 = compute_comp_stats(sales.get("PSA 10", []))
+        a = evaluate_standard_path(raw[anchor_key], raw["floor_25"], target_roi_decimal, include_grading=False)
+        b = evaluate_standard_path(p10[anchor_key], p10["floor_25"], target_roi_decimal, include_grading=True)
+        p9 = compute_comp_stats(sales.get("PSA 9", []))
+        cap9 = None
+        if p9["count"] and p10["count"]:
+            cap9 = evaluate_psa9_bailout(p9[anchor_key], b["max_buy"])["breakeven_buy_cap"]
+        return {
+            "A": a["max_buy"] if raw["count"] else None,
+            "B": b["max_buy"] if p10["count"] else None,
+            "cap9": cap9,
+            "n": raw["count"],
+            "n_b": p10["count"],
         }
-    else:
-        slab_input_str = st.text_area(
-            f"30-Day {detected_condition} Sold Prices ($)",
-            value="390, 410, 425, 440, 460",
-            height=90,
+    st_ = compute_comp_stats(sales.get(cond, []))
+    c = evaluate_standard_path(st_[anchor_key], st_["floor_25"], target_roi_decimal, include_grading=False)
+    return {"A": c["max_buy"] if st_["count"] else None, "B": None, "cap9": None, "n": st_["count"], "n_b": 0}
+
+
+def build_deal_rows(
+    query: str,
+    exclude_inserts: bool,
+    auto_filter: str,
+    include_bo: bool,
+    include_auctions: bool,
+    sort: str,
+    buy_type: str,
+) -> dict:
+    """Pull comps + active eBay listings for one search and score every listing against its buy ceiling."""
+    cs_key = get_secret_key("COMPSNIPER_API_KEY")
+    tca_key = get_secret_key("THECARDAPI_KEY")
+    recs, errors = gather_merged_comps(query, cs_key, tca_key, exclude_inserts, auto_filter, include_bo, include_auctions)
+    sales: dict[str, list[float]] = {}
+    for r in recs:
+        if r.get("Include", True):
+            sales.setdefault(r["Condition"], []).append(float(r["Sold Price ($)"]))
+
+    el = fetch_ebay_active_listings(
+        query, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), sort, buy_type
+    )
+    if not el["ok"]:
+        return {"ok": False, "error": el["error"], "rows": [], "sales": sales, "errors": errors}
+
+    ceil_cache: dict[str, dict] = {}
+    rows: list[dict] = []
+    for l in el["records"]:
+        if not title_passes_filters(l["Title"], query, exclude_inserts, auto_filter):
+            continue
+        cond = classify_sale_condition({"title": l["Title"]})
+        if cond not in ceil_cache:
+            ceil_cache[cond] = compute_ceilings(sales, cond)
+        c = ceil_cache[cond]
+        total = l["Price ($)"] + (l["Ship ($)"] or 0.0)
+        ceil_a, ceil_b, cap9 = c["A"], c["B"], c.get("cap9")
+        thin = " ⚠️ thin comps" if (c["n"] < 3 and c["A"] is not None) else ""
+        if ceil_a is None and ceil_b is None:
+            verdict = "⚠️ No comps"
+            room = None
+        elif cond == "Raw":
+            # Path B is only "safe" if a PSA 9 outcome still breaks even (your bailout rule).
+            safe_b = min(ceil_b, cap9) if (ceil_b is not None and cap9 is not None) else None
+            if ceil_a is not None and total <= ceil_a:
+                verdict = "✅ Path A Deal" + thin
+            elif safe_b is not None and total <= safe_b:
+                verdict = "🎯 Path B Deal (PSA 9 safe)" + thin
+            elif ceil_b is not None and total <= ceil_b:
+                verdict = "🎲 Path B — needs PSA 10"
+            else:
+                verdict = "❌ Over ceiling"
+            safe_ceils = [x for x in (ceil_a, safe_b) if x is not None]
+            room = (max(safe_ceils) if safe_ceils else ceil_b) - total
+        else:
+            verdict = ("✅ Slab Deal" + thin) if total <= ceil_a else "❌ Over ceiling"
+            room = ceil_a - total
+        rows.append(
+            {
+                "Photo": l["Photo"],
+                "Verdict": verdict,
+                "Grade": cond,
+                "All-In ($)": round(total, 2),
+                "Price ($)": l["Price ($)"],
+                "Ship ($)": l["Ship ($)"],
+                "Ceiling A/Slab ($)": None if ceil_a is None else round(ceil_a, 2),
+                "Ceiling B ($)": None if ceil_b is None else round(ceil_b, 2),
+                "PSA 9 Safe Cap ($)": None if cap9 is None else round(cap9, 2),
+                "Room ($)": None if room is None else round(room, 2),
+                "Type": l["Type"],
+                "Search": query,
+                "Title": l["Title"],
+                "Link": l["Link"],
+            }
         )
-        card_sales_data = {
-            detected_condition: parse_price_list(slab_input_str),
-        }
+    return {"ok": True, "error": "", "rows": rows, "sales": sales, "errors": errors}
+
+
+DEAL_TABLE_CONFIG = {
+    "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
+    "All-In ($)": st.column_config.NumberColumn("All-In (Price+Ship)", format="$%.2f"),
+    "Price ($)": st.column_config.NumberColumn("Price", format="$%.2f"),
+    "Ship ($)": st.column_config.NumberColumn("Shipping", format="$%.2f"),
+    "Ceiling A/Slab ($)": st.column_config.NumberColumn("Max Buy (Path A / Slab)", format="$%.2f"),
+    "Ceiling B ($)": st.column_config.NumberColumn("Max Buy (Path B, needs PSA 10)", format="$%.2f"),
+    "PSA 9 Safe Cap ($)": st.column_config.NumberColumn("PSA 9 Safe Cap", format="$%.2f"),
+    "Room ($)": st.column_config.NumberColumn("Room Under Ceiling", format="$%.2f"),
+    "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
+    "Title": st.column_config.TextColumn("Title", width="large"),
+}
+
+
+live_records: list[dict] = []
 
 # ---------------------------------------------------------------------------
 # Custom Ville-In-Us Branded SVG Section Headers (Replaces Generic Emojis)
@@ -1367,258 +1273,648 @@ def brand_heading(icon_svg: str, title_text: str, size_rem: float = 1.28, icon_p
     )
 
 
-# ---------------------------------------------------------------------------
-# TIER 1 — Default Clean Snapshot (Always Visible)
-# ---------------------------------------------------------------------------
-st.markdown(
-    brand_heading(ICON_TIER1, "Tier 1 — Valuation & Buy Ceiling Snapshot", size_rem=1.22, icon_px=28),
-    unsafe_allow_html=True,
-)
+# Select Card & Listing Condition
+if data_mode == "Live Sold Comps":
+    if "comps_query" not in st.session_state:
+        st.session_state.comps_query = ""
 
-if detected_condition == "Raw":
-    raw_stats = compute_comp_stats(card_sales_data.get("Raw", []))
-    psa10_stats = compute_comp_stats(card_sales_data.get("PSA 10", []))
-    psa9_stats = compute_comp_stats(card_sales_data.get("PSA 9", []))
+    qc1, qc2 = st.columns([3.4, 1.1])
+    with qc1:
+        selected_card_title = st.text_input(
+            "Search Any Card (Include Card # like '305' for Exact Base/Parallel Match)",
+            placeholder="e.g. 2023 Prizm Bijan Robinson Silver 305",
+            key="comps_query",
+            help="Tip: Keep keywords short (year + set + player + parallel + card #) so cheap inserts don't mix in. Starts blank to save API tokens.",
+        )
+    with qc2:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        st.button(
+            "⚡ Bijan Silver #305",
+            key="load_bijan_comps",
+            use_container_width=True,
+            on_click=lambda: st.session_state.update({"comps_query": "2023 Prizm Bijan Robinson Silver 305"}),
+        )
+    detected_condition = "Raw"
 
-    # Header Metadata Banner
+    fcol1, fcol2, fcol3, fcol4 = st.columns([1.2, 1.3, 1.1, 1.4])
+    with fcol1:
+        auto_filter_mode = st.selectbox(
+            "Autograph Filter",
+            options=["Non-Auto Only", "Autographs Only", "All"],
+            index=0,
+            help="Separates True Silver Non-Autos from True Silver Autographs that share the same card #.",
+        )
+    with fcol2:
+        exclude_inserts_flag = st.checkbox(
+            "Block Inserts, Variations & Other Sets",
+            value=True,
+            help="Automatically filters out Flashback, Emergent, Variation, Relic/Jersey, Select, Mosaic, and Draft Picks.",
+        )
+    with fcol3:
+        include_bo_flag = st.checkbox(
+            "Include Best Offer Sales",
+            value=True,
+            help="CompSniper returns the actual accepted Best Offer price; The Card API uses the listed ask when hidden.",
+        )
+    with fcol4:
+        include_auctions_flag = st.checkbox(
+            "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
+            value=True,
+            help="Pulls verified graded card sales (with Buyer's Premium included) from Goldin, Fanatics Collect, MySlabs, and Pristine.",
+        )
+
+    card_sales_data = {"Raw": [], "PSA 10": [], "PSA 9": [], "BGS 9.5": [], "SGC 10": []}
+
+    if not selected_card_title.strip():
+        st.info("🔎 Enter a card above and press **Enter** (or click **⚡ Bijan Silver #305**) to pull live comps. Blank by default so opening the app uses zero API tokens.")
+    else:
+        cs_key = get_secret_key("COMPSNIPER_API_KEY")
+        tca_key = get_secret_key("THECARDAPI_KEY")
+
+        with st.spinner(f"Pulling live verified sold comps & card photos for '{selected_card_title}'..."):
+            merged_records, errors = gather_merged_comps(
+                selected_card_title,
+                cs_key,
+                tca_key,
+                exclude_inserts_flag,
+                auto_filter_mode,
+                include_bo_flag,
+                include_auctions_flag,
+            )
+        live_records = merged_records
+
+        if errors and not live_records:
+            st.error(" | ".join(errors))
+        elif not live_records:
+            st.warning("No matching sales found with the current filters. Try broadening your search or toggling the Autograph Filter.")
+        else:
+            if errors:
+                st.caption(f"⚠️ Partial source warning: {' | '.join(errors)}")
+
+            # Placeholder above the photo/filter section so 30-Day Comp Summary renders on top
+            # while still reflecting live checkbox/grade edits from st.data_editor below.
+            summary_placeholder = st.container()
+
+            with st.expander(
+                f"🖼️ Visual Card Photos & Comp Filter ({len(live_records)} Verified Sales Matched — Uncheck Any Wrong Card)",
+                expanded=True,
+            ):
+                # Visual Card Photo Strip (Top 6 Sales with Images)
+                photo_records = [r for r in live_records if r.get("Photo")][:6]
+                if photo_records:
+                    st.caption("📸 **Recent Sold Card Photos (Visual Verification):**")
+                    pcols = st.columns(len(photo_records))
+                    for idx, rec in enumerate(photo_records):
+                        with pcols[idx]:
+                            st.image(rec["Photo"], width="stretch")
+                            st.markdown(
+                                f"<div style='font-size:0.76rem; line-height:1.25; text-align:center;'>"
+                                f"<b style='color:#4ade80;'>\\${rec['Sold Price ($)']:,.2f}</b> &bull; "
+                                f"<span style='color:#c084fc;font-weight:700;'>{rec['Condition']}</span><br/>"
+                                f"<span style='color:#94a3b8;'>{rec['Sale Date']} ({rec.get('Source', '')})</span></div>",
+                                unsafe_allow_html=True,
+                            )
+
+                st.caption("☑️ **Uncheck `Include` on any outlier, or click `Grade` to re-assign a mislabeled card:**")
+                display_records = [{k: v for k, v in r.items() if k != "_item_id"} for r in live_records]
+                df_editor = pd.DataFrame(display_records)
+                edited_df = st.data_editor(
+                    df_editor,
+                    width="stretch",
+                    hide_index=True,
+                    disabled=["Photo", "Sold Price ($)", "Sale Date", "Card #", "Source", "Type", "Listing Title", "Link"],
+                    column_config={
+                        "Include": st.column_config.CheckboxColumn("Include ✅", default=True),
+                        "Photo": st.column_config.ImageColumn("Card Photo", width="small"),
+                        "Condition": st.column_config.SelectboxColumn(
+                            "Grade (Editable)",
+                            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10", "Other Slab"],
+                            required=True,
+                        ),
+                        "Sold Price ($)": st.column_config.NumberColumn("Sold Price", format="$%.2f"),
+                        "Sale Date": st.column_config.TextColumn("Date Sold"),
+                        "Card #": st.column_config.TextColumn("Card #"),
+                        "Source": st.column_config.TextColumn("API Source"),
+                        "Type": st.column_config.TextColumn("Sale Type"),
+                        "Listing Title": st.column_config.TextColumn("Listing Title", width="large"),
+                        "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
+                    },
+                    key=f"comp_editor_v3_{data_mode}_{selected_card_title}_{auto_filter_mode}_{exclude_inserts_flag}_{include_bo_flag}",
+                )
+
+                for _, row in edited_df.iterrows():
+                    if row["Include"] and row["Condition"] in card_sales_data:
+                        card_sales_data[row["Condition"]].append(float(row["Sold Price ($)"]))
+
+                r_c = len(card_sales_data["Raw"])
+                r_avg = pd.Series(card_sales_data["Raw"], dtype=float).mean() if r_c else 0.0
+                r_med = pd.Series(card_sales_data["Raw"], dtype=float).median() if r_c else 0.0
+                p10_c = len(card_sales_data["PSA 10"])
+                p10_avg = pd.Series(card_sales_data["PSA 10"], dtype=float).mean() if p10_c else 0.0
+                p10_med = pd.Series(card_sales_data["PSA 10"], dtype=float).median() if p10_c else 0.0
+                st.info(
+                    f"📊 **Live Checked Selection Stats:** "
+                    f"**Raw ({r_c} checked):** Average `${r_avg:,.2f}` | Median `${r_med:,.2f}` &nbsp;&bull;&nbsp; "
+                    f"**PSA 10 ({p10_c} checked):** Average `${p10_avg:,.2f}` | Median `${p10_med:,.2f}`"
+                )
+
+            with summary_placeholder:
+                st.markdown(
+                    brand_heading(ICON_TIER1, "30-Day Comp Summary (Checked Sales)", size_rem=1.22, icon_px=28),
+                    unsafe_allow_html=True,
+                )
+                summary_rows = []
+                for cond_name in ["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"]:
+                    vals = card_sales_data.get(cond_name, [])
+                    if vals:
+                        s_ = compute_comp_stats(vals)
+                        summary_rows.append(
+                            {
+                                "Grade": cond_name,
+                                "Sales": s_["count"],
+                                "30-Day High": s_["high"],
+                                "Average": s_["mean"],
+                                "Median": s_["median"],
+                                "25th-Pct Floor": s_["floor_25"],
+                                "30-Day Low": s_["low"],
+                            }
+                        )
+                if summary_rows:
+                    st.dataframe(
+                        pd.DataFrame(summary_rows),
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            k: st.column_config.NumberColumn(k, format="$%.2f")
+                            for k in ["30-Day High", "Average", "Median", "25th-Pct Floor", "30-Day Low"]
+                        },
+                    )
+                    st.caption(
+                        "💡 Valuation, Path A / Path B buy ceilings and the PSA 9 bailout live under "
+                        "**eBay Live Listings (Buy Side)** in the sidebar."
+                    )
+
+elif data_mode == "Manual / Paste Comps":
+    # Manual / Paste Comps Mode so user can use the tool immediately before eBay API arrives
+    col_card, col_cond = st.columns([2.2, 1])
+    with col_card:
+        selected_card_title = st.text_input(
+            "Card Title / Listing Name",
+            value="2023 Panini Prizm Bijan Robinson True Silver Auto #305",
+        )
+    with col_cond:
+        detected_condition = st.selectbox(
+            "Listing Condition (Auto-Routes Evaluation Path)",
+            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
+            index=0,
+        )
+
+    st.markdown("##### Paste 30-Day Settled Sold Prices (comma or space separated)")
+    if detected_condition == "Raw":
+        mcol1, mcol2, mcol3 = st.columns(3)
+        with mcol1:
+            raw_input_str = st.text_area(
+                "30-Day Raw Sold Prices ($)",
+                value="155, 165, 170, 175, 180, 185, 195",
+                height=90,
+            )
+        with mcol2:
+            psa10_input_str = st.text_area(
+                "30-Day PSA 10 Sold Prices ($)",
+                value="390, 410, 425, 440, 460",
+                height=90,
+            )
+        with mcol3:
+            psa9_input_str = st.text_area(
+                "30-Day PSA 9 Sold Prices ($)",
+                value="200, 210, 215, 225, 235",
+                height=90,
+            )
+        card_sales_data = {
+            "Raw": parse_price_list(raw_input_str),
+            "PSA 10": parse_price_list(psa10_input_str),
+            "PSA 9": parse_price_list(psa9_input_str),
+        }
+    else:
+        slab_input_str = st.text_area(
+            f"30-Day {detected_condition} Sold Prices ($)",
+            value="390, 410, 425, 440, 460",
+            height=90,
+        )
+        card_sales_data = {
+            detected_condition: parse_price_list(slab_input_str),
+        }
+
+def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_title: str) -> None:
+    # ---------------------------------------------------------------------------
+    # TIER 1 — Default Clean Snapshot (Always Visible)
+    # ---------------------------------------------------------------------------
     st.markdown(
-        f"""
-        <div class="comp-metadata-bar">
-            <b>TARGET CARD:</b> {selected_card_title}<br>
-            <b>DETECTED CONDITION:</b> <span style="color:#f43f5e;font-weight:700;">RAW (UN-GRADED)</span> &nbsp;&bull;&nbsp;
-            <b>30-DAY LIQUIDITY:</b> <span style="color:#c084fc;font-weight:700;">{raw_stats['count']} raw sales | {psa10_stats['count']} PSA 10 sales | {psa9_stats['count']} PSA 9 sales</span> &nbsp;&bull;&nbsp;
-            <b>TARGET ROI:</b> <span style="color:#4ade80;font-weight:700;">{target_roi_pct}%</span>
-        </div>
-        """,
+        brand_heading(ICON_TIER1, "Tier 1 — Valuation & Buy Ceiling Snapshot", size_rem=1.22, icon_px=28),
         unsafe_allow_html=True,
     )
 
-    path_a = evaluate_standard_path(
-        median_price=raw_stats[anchor_key],
-        floor_price=raw_stats["floor_25"],
-        target_roi_decimal=target_roi_decimal,
-        include_grading=False,
-    )
-    path_b = evaluate_standard_path(
-        median_price=psa10_stats[anchor_key],
-        floor_price=psa10_stats["floor_25"],
-        target_roi_decimal=target_roi_decimal,
-        include_grading=True,
-    )
-    bailout_9 = evaluate_psa9_bailout(
-        psa9_median=psa9_stats[anchor_key],
-        path_b_max_buy=path_b["max_buy"],
-    )
+    if detected_condition == "Raw":
+        raw_stats = compute_comp_stats(card_sales_data.get("Raw", []))
+        psa10_stats = compute_comp_stats(card_sales_data.get("PSA 10", []))
+        psa9_stats = compute_comp_stats(card_sales_data.get("PSA 9", []))
 
-    col_path_a, col_path_b = st.columns(2)
+        # Header Metadata Banner
+        st.markdown(
+            f"""
+            <div class="comp-metadata-bar">
+                <b>TARGET CARD:</b> {selected_card_title}<br>
+                <b>DETECTED CONDITION:</b> <span style="color:#f43f5e;font-weight:700;">RAW (UN-GRADED)</span> &nbsp;&bull;&nbsp;
+                <b>30-DAY LIQUIDITY:</b> <span style="color:#c084fc;font-weight:700;">{raw_stats['count']} raw sales | {psa10_stats['count']} PSA 10 sales | {psa9_stats['count']} PSA 9 sales</span> &nbsp;&bull;&nbsp;
+                <b>TARGET ROI:</b> <span style="color:#4ade80;font-weight:700;">{target_roi_pct}%</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # --- PATH A SUMMARY BLOCK ---
-    with col_path_a:
+        path_a = evaluate_standard_path(
+            median_price=raw_stats[anchor_key],
+            floor_price=raw_stats["floor_25"],
+            target_roi_decimal=target_roi_decimal,
+            include_grading=False,
+        )
+        path_b = evaluate_standard_path(
+            median_price=psa10_stats[anchor_key],
+            floor_price=psa10_stats["floor_25"],
+            target_roi_decimal=target_roi_decimal,
+            include_grading=True,
+        )
+        bailout_9 = evaluate_psa9_bailout(
+            psa9_median=psa9_stats[anchor_key],
+            path_b_max_buy=path_b["max_buy"],
+        )
+
+        col_path_a, col_path_b = st.columns(2)
+
+        # --- PATH A SUMMARY BLOCK ---
+        with col_path_a:
+            with st.container(border=True):
+                st.markdown(
+                    brand_heading(ICON_PATH_A, "PATH A — RAW-TO-RAW FLIP"),
+                    unsafe_allow_html=True,
+                )
+                st.caption("Buy Raw -> Sell Raw (Bypasses $47 PSA grading fee)")
+
+                m1, m2 = st.columns(2)
+                m1.metric(f"30-Day Raw {anchor_label}", f"${path_a['median']:,.2f}")
+                m2.metric("25th-Pct Conservative Floor", f"${path_a['floor_25']:,.2f}")
+
+                m3, m4 = st.columns(2)
+                m3.metric("Net Payout (After Fees/Ship)", f"${path_a['net_payout']:,.2f}")
+                m4.metric(
+                    f"Max All-In Buy ({target_roi_pct}% ROI)",
+                    f"${path_a['max_buy']:,.2f}",
+                    delta=f"+${path_a['expected_profit']:,.2f} Est. Net Profit",
+                )
+
+                # TIER 2 — Clickable Arithmetic Breakdown (Path A)
+                with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path A)"):
+                    st.markdown("#### 0. 30-Day Raw Sales Range (High / Average / Median / Floor / Low)")
+                    st.markdown(
+                        f"""
+                        - **30-Day High Sale:** **\\${raw_stats['high']:,.2f}**
+                        - **30-Day Average (Mean):** **\\${raw_stats['mean']:,.2f}**
+                        - **30-Day Median (Middle Sale):** **\\${raw_stats['median']:,.2f}** ({raw_stats['count']} sales)
+                        - **25th-Percentile Conservative Floor:** **\\${path_a['floor_25']:,.2f}**
+                        - **30-Day Low Sale:** **\\${raw_stats['low']:,.2f}**
+                        """
+                    )
+                    st.markdown("#### 1. Net Payout & Max Buy Price Math")
+                    st.markdown(
+                        f"""
+                        - **30-Day Raw {anchor_label} Anchor:** \\${path_a['median']:,.2f} ({raw_stats['count']} sales)
+                        - **Less eBay Final Value Fee (13.25%):** -\\${path_a['ebay_fee_median']:,.2f}
+                        - **Less Outbound Bubble Mailer & Supplies:** -\\${path_a['shipping_cost']:,.2f}
+                        - **Equals Net Payout:** **\\${path_a['net_payout']:,.2f}**
+                        - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_a['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_a['max_buy']:,.2f} Max All-In Buy**
+                        """
+                    )
+                    st.markdown("#### 2. 25th-Percentile Floor Stress Test")
+                    floor_status = "PROFIT" if path_a["floor_profit_loss"] >= 0 else "LOSS"
+                    st.markdown(
+                        f"""
+                        *If you buy at the Max All-In Buy (\\${path_a['max_buy']:,.2f}) and are forced to exit at the 25th-percentile floor (\\${path_a['floor_25']:,.2f}):*
+                        - **Floor Sale Price:** \\${path_a['floor_25']:,.2f}
+                        - **Less eBay Fee (13.25%) & Shipping (\\$4.50):** -\\${path_a['ebay_fee_floor'] + path_a['shipping_cost']:,.2f}
+                        - **Floor Net Payout:** \\${path_a['net_payout_floor']:,.2f}
+                        - **Worst-Case Net {floor_status}:** **\\${path_a['floor_profit_loss']:+,.2f}**
+                        """
+                    )
+
+        # --- PATH B SUMMARY BLOCK ---
+        with col_path_b:
+            with st.container(border=True):
+                st.markdown(
+                    brand_heading(ICON_PATH_B, "PATH B — RAW-TO-PSA 10 GRADE"),
+                    unsafe_allow_html=True,
+                )
+                st.caption("Buy Raw -> Grade with PSA ($47.00 all-in) -> Sell PSA 10")
+
+                b1, b2 = st.columns(2)
+                b1.metric(f"30-Day PSA 10 {anchor_label}", f"${path_b['median']:,.2f}")
+                b2.metric("25th-Pct Conservative Floor", f"${path_b['floor_25']:,.2f}")
+
+                b3, b4 = st.columns(2)
+                b3.metric("Net Payout (After Fees/Ship/PSA)", f"${path_b['net_payout']:,.2f}")
+                b4.metric(
+                    f"Max All-In Buy ({target_roi_pct}% ROI)",
+                    f"${path_b['max_buy']:,.2f}",
+                    delta=f"+${path_b['expected_profit']:,.2f} Est. Net Profit",
+                )
+
+                st.divider()
+                st.markdown(
+                    brand_heading(ICON_BAILOUT_9, "PSA 9 BAILOUT CHECK", size_rem=1.08, icon_px=30),
+                    unsafe_allow_html=True,
+                )
+                bail_col1, bail_col2, bail_col3 = st.columns(3)
+                bail_col1.metric(f"30-Day PSA 9 {anchor_label}", f"${bailout_9['psa9_median']:,.2f}")
+                bail_col2.metric(
+                    "PSA 9 Net Profit / Loss",
+                    f"${bailout_9['bailout_profit_loss']:+,.2f}",
+                    delta="If bought at Path B Max Buy",
+                    delta_color="normal" if bailout_9["bailout_profit_loss"] >= 0 else "inverse",
+                )
+                bail_col3.metric(
+                    "Zero-Risk Breakeven Buy Cap",
+                    f"${bailout_9['breakeven_buy_cap']:,.2f}",
+                    help="Max price you can pay for the Raw card so that even a PSA 9 grade breaks 100% even after all PSA & eBay fees.",
+                )
+
+                # TIER 2 — Clickable Arithmetic Breakdown (Path B)
+                with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path B)"):
+                    st.markdown("#### 0. 30-Day Graded Sales Range (PSA 10 & PSA 9 High / Avg / Median / Low)")
+                    st.markdown(
+                        f"""
+                        - **PSA 10 ({psa10_stats['count']} sales):** High **\\${psa10_stats['high']:,.2f}** &nbsp;|&nbsp; Avg **\\${psa10_stats['mean']:,.2f}** &nbsp;|&nbsp; Median **\\${psa10_stats['median']:,.2f}** &nbsp;|&nbsp; 25th-Pct Floor **\\${path_b['floor_25']:,.2f}** &nbsp;|&nbsp; Low **\\${psa10_stats['low']:,.2f}**
+                        - **PSA 9 ({psa9_stats['count']} sales):** High **\\${psa9_stats['high']:,.2f}** &nbsp;|&nbsp; Avg **\\${psa9_stats['mean']:,.2f}** &nbsp;|&nbsp; Median **\\${psa9_stats['median']:,.2f}** &nbsp;|&nbsp; 25th-Pct Floor **\\${psa9_stats['floor_25']:,.2f}** &nbsp;|&nbsp; Low **\\${psa9_stats['low']:,.2f}**
+                        """
+                    )
+                    st.markdown("#### 1. PSA 10 Net Payout & Max Buy Price Math")
+                    st.markdown(
+                        f"""
+                        - **30-Day PSA 10 {anchor_label} Anchor:** \\${path_b['median']:,.2f} ({psa10_stats['count']} sales)
+                        - **Less eBay Final Value Fee (13.25%):** -\\${path_b['ebay_fee_median']:,.2f}
+                        - **Less Outbound Bubble Mailer & Supplies:** -\\${path_b['shipping_cost']:,.2f}
+                        - **Less PSA All-In Grading Cost:** -\\${path_b['grading_cost']:,.2f} (\\$39.99 Value + \\$7.01 insured ship/prep)
+                        - **Equals Net Payout:** **\\${path_b['net_payout']:,.2f}**
+                        - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_b['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_b['max_buy']:,.2f} Max All-In Buy**
+                        """
+                    )
+                    st.markdown("#### 2. PSA 9 Bailout Arithmetic")
+                    st.markdown(
+                        f"""
+                        - **30-Day PSA 9 Median:** \\${bailout_9['psa9_median']:,.2f} ({psa9_stats['count']} sales)
+                        - **Less eBay Fee (13.25%):** -\\${bailout_9['ebay_fee_psa9']:,.2f}
+                        - **Less Mailer (\\$4.50) & PSA Grading (\\$47.00):** -\\$51.50
+                        - **PSA 9 Net Payout (Zero-Risk Breakeven Buy Cap):** **\\${bailout_9['breakeven_buy_cap']:,.2f}**
+                        - **Net Result if Bought at Path B Max Buy (\\${path_b['max_buy']:,.2f}):** **\\${bailout_9['bailout_profit_loss']:+,.2f}**
+                        """
+                    )
+                    st.markdown("#### 3. 25th-Percentile PSA 10 Floor Stress Test")
+                    floor_b_status = "PROFIT" if path_b["floor_profit_loss"] >= 0 else "LOSS"
+                    st.markdown(
+                        f"""
+                        *If you buy at Path B Max Buy (\\${path_b['max_buy']:,.2f}), hit a PSA 10, and are forced to exit at the 25th-percentile PSA 10 floor (\\${path_b['floor_25']:,.2f}):*
+                        - **PSA 10 Floor Net Payout:** \\${path_b['net_payout_floor']:,.2f}
+                        - **Worst-Case PSA 10 Net {floor_b_status}:** **\\${path_b['floor_profit_loss']:+,.2f}**
+                        """
+                    )
+
+    else:
+        # --- PATH C — ANY-GRADE SLAB-TO-SLAB FLIP ---
+        slab_sales = card_sales_data.get(detected_condition, [])
+        slab_stats = compute_comp_stats(slab_sales)
+
+        st.markdown(
+            f"""
+            <div class="comp-metadata-bar">
+                <b>TARGET CARD:</b> {selected_card_title}<br>
+                <b>DETECTED CONDITION / GRADE:</b> <span style="color:#f43f5e;font-weight:700;">{detected_condition} (GRADED SLAB)</span> &nbsp;&bull;&nbsp;
+                <b>30-DAY LIQUIDITY:</b> <span style="color:#c084fc;font-weight:700;">{slab_stats['count']} {detected_condition} sales</span> &nbsp;&bull;&nbsp;
+                <b>TARGET ROI:</b> <span style="color:#4ade80;font-weight:700;">{target_roi_pct}%</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        path_c = evaluate_standard_path(
+            median_price=slab_stats[anchor_key],
+            floor_price=slab_stats["floor_25"],
+            target_roi_decimal=target_roi_decimal,
+            include_grading=False,
+        )
+
         with st.container(border=True):
             st.markdown(
-                brand_heading(ICON_PATH_A, "PATH A — RAW-TO-RAW FLIP"),
+                brand_heading(ICON_PATH_C, f"PATH C — SLAB-TO-SLAB FLIP ({detected_condition})"),
                 unsafe_allow_html=True,
             )
-            st.caption("Buy Raw -> Sell Raw (Bypasses $47 PSA grading fee)")
+            st.caption(f"Buy {detected_condition} Slab -> Sell {detected_condition} Slab (Grading cost bypassed: $0.00)")
 
-            m1, m2 = st.columns(2)
-            m1.metric(f"30-Day Raw {anchor_label}", f"${path_a['median']:,.2f}")
-            m2.metric("25th-Pct Conservative Floor", f"${path_a['floor_25']:,.2f}")
-
-            m3, m4 = st.columns(2)
-            m3.metric("Net Payout (After Fees/Ship)", f"${path_a['net_payout']:,.2f}")
-            m4.metric(
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric(f"30-Day {detected_condition} {anchor_label}", f"${path_c['median']:,.2f}")
+            c2.metric("25th-Pct Conservative Floor", f"${path_c['floor_25']:,.2f}")
+            c3.metric("Net Payout (After Fees/Ship)", f"${path_c['net_payout']:,.2f}")
+            c4.metric(
                 f"Max All-In Buy ({target_roi_pct}% ROI)",
-                f"${path_a['max_buy']:,.2f}",
-                delta=f"+${path_a['expected_profit']:,.2f} Est. Net Profit",
+                f"${path_c['max_buy']:,.2f}",
+                delta=f"+${path_c['expected_profit']:,.2f} Est. Net Profit",
             )
 
-            # TIER 2 — Clickable Arithmetic Breakdown (Path A)
-            with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path A)"):
-                st.markdown("#### 0. 30-Day Raw Sales Range (High / Average / Median / Floor / Low)")
+            # TIER 2 — Clickable Arithmetic Breakdown (Path C)
+            with st.expander(f"➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path C: {detected_condition})"):
+                st.markdown(f"#### 0. 30-Day {detected_condition} Sales Range (High / Average / Median / Floor / Low)")
                 st.markdown(
                     f"""
-                    - **30-Day High Sale:** **\\${raw_stats['high']:,.2f}**
-                    - **30-Day Average (Mean):** **\\${raw_stats['mean']:,.2f}**
-                    - **30-Day Median (Middle Sale):** **\\${raw_stats['median']:,.2f}** ({raw_stats['count']} sales)
-                    - **25th-Percentile Conservative Floor:** **\\${path_a['floor_25']:,.2f}**
-                    - **30-Day Low Sale:** **\\${raw_stats['low']:,.2f}**
+                    - **30-Day High Sale:** **\\${slab_stats['high']:,.2f}**
+                    - **30-Day Average (Mean):** **\\${slab_stats['mean']:,.2f}**
+                    - **30-Day Median (Middle Sale):** **\\${slab_stats['median']:,.2f}** ({slab_stats['count']} sales)
+                    - **25th-Percentile Conservative Floor:** **\\${path_c['floor_25']:,.2f}**
+                    - **30-Day Low Sale:** **\\${slab_stats['low']:,.2f}**
                     """
                 )
                 st.markdown("#### 1. Net Payout & Max Buy Price Math")
                 st.markdown(
                     f"""
-                    - **30-Day Raw {anchor_label} Anchor:** \\${path_a['median']:,.2f} ({raw_stats['count']} sales)
-                    - **Less eBay Final Value Fee (13.25%):** -\\${path_a['ebay_fee_median']:,.2f}
-                    - **Less Outbound Bubble Mailer & Supplies:** -\\${path_a['shipping_cost']:,.2f}
-                    - **Equals Net Payout:** **\\${path_a['net_payout']:,.2f}**
-                    - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_a['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_a['max_buy']:,.2f} Max All-In Buy**
+                    - **30-Day {detected_condition} {anchor_label} Anchor:** \\${path_c['median']:,.2f} ({slab_stats['count']} sales)
+                    - **Less eBay Final Value Fee (13.25%):** -\\${path_c['ebay_fee_median']:,.2f}
+                    - **Less Outbound Bubble Mailer & Supplies:** -\\${path_c['shipping_cost']:,.2f}
+                    - **Grading Cost:** \\$0.00 (Already slabbed)
+                    - **Equals Net Payout:** **\\${path_c['net_payout']:,.2f}**
+                    - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_c['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_c['max_buy']:,.2f} Max All-In Buy**
                     """
                 )
                 st.markdown("#### 2. 25th-Percentile Floor Stress Test")
-                floor_status = "PROFIT" if path_a["floor_profit_loss"] >= 0 else "LOSS"
+                floor_c_status = "PROFIT" if path_c["floor_profit_loss"] >= 0 else "LOSS"
                 st.markdown(
                     f"""
-                    *If you buy at the Max All-In Buy (\\${path_a['max_buy']:,.2f}) and are forced to exit at the 25th-percentile floor (\\${path_a['floor_25']:,.2f}):*
-                    - **Floor Sale Price:** \\${path_a['floor_25']:,.2f}
-                    - **Less eBay Fee (13.25%) & Shipping (\\$4.50):** -\\${path_a['ebay_fee_floor'] + path_a['shipping_cost']:,.2f}
-                    - **Floor Net Payout:** \\${path_a['net_payout_floor']:,.2f}
-                    - **Worst-Case Net {floor_status}:** **\\${path_a['floor_profit_loss']:+,.2f}**
+                    *If you buy at the Max All-In Buy (\\${path_c['max_buy']:,.2f}) and are forced to exit at the 25th-percentile floor (\\${path_c['floor_25']:,.2f}):*
+                    - **Floor Sale Price:** \\${path_c['floor_25']:,.2f}
+                    - **Less eBay Fee (13.25%) & Shipping (\\$4.50):** -\\${path_c['ebay_fee_floor'] + path_c['shipping_cost']:,.2f}
+                    - **Floor Net Payout:** \\${path_c['net_payout_floor']:,.2f}
+                    - **Worst-Case Net {floor_c_status}:** **\\${path_c['floor_profit_loss']:+,.2f}**
                     """
                 )
 
-    # --- PATH B SUMMARY BLOCK ---
-    with col_path_b:
-        with st.container(border=True):
-            st.markdown(
-                brand_heading(ICON_PATH_B, "PATH B — RAW-TO-PSA 10 GRADE"),
-                unsafe_allow_html=True,
-            )
-            st.caption("Buy Raw -> Grade with PSA ($47.00 all-in) -> Sell PSA 10")
 
-            b1, b2 = st.columns(2)
-            b1.metric(f"30-Day PSA 10 {anchor_label}", f"${path_b['median']:,.2f}")
-            b2.metric("25th-Pct Conservative Floor", f"${path_b['floor_25']:,.2f}")
+# ---------------------------------------------------------------------------
+# MODE ROUTING — Comps summary / Manual valuation / Buy Side / Deal Finder
+# ---------------------------------------------------------------------------
+if data_mode == "Live Sold Comps":
+    pass
 
-            b3, b4 = st.columns(2)
-            b3.metric("Net Payout (After Fees/Ship/PSA)", f"${path_b['net_payout']:,.2f}")
-            b4.metric(
-                f"Max All-In Buy ({target_roi_pct}% ROI)",
-                f"${path_b['max_buy']:,.2f}",
-                delta=f"+${path_b['expected_profit']:,.2f} Est. Net Profit",
-            )
+elif data_mode == "Manual / Paste Comps":
+    render_tier1(card_sales_data, detected_condition, selected_card_title)
 
-            st.divider()
-            st.markdown(
-                brand_heading(ICON_BAILOUT_9, "PSA 9 BAILOUT CHECK", size_rem=1.08, icon_px=30),
-                unsafe_allow_html=True,
-            )
-            bail_col1, bail_col2, bail_col3 = st.columns(3)
-            bail_col1.metric(f"30-Day PSA 9 {anchor_label}", f"${bailout_9['psa9_median']:,.2f}")
-            bail_col2.metric(
-                "PSA 9 Net Profit / Loss",
-                f"${bailout_9['bailout_profit_loss']:+,.2f}",
-                delta="If bought at Path B Max Buy",
-                delta_color="normal" if bailout_9["bailout_profit_loss"] >= 0 else "inverse",
-            )
-            bail_col3.metric(
-                "Zero-Risk Breakeven Buy Cap",
-                f"${bailout_9['breakeven_buy_cap']:,.2f}",
-                help="Max price you can pay for the Raw card so that even a PSA 9 grade breaks 100% even after all PSA & eBay fees.",
-            )
-
-            # TIER 2 — Clickable Arithmetic Breakdown (Path B)
-            with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path B)"):
-                st.markdown("#### 0. 30-Day Graded Sales Range (PSA 10 & PSA 9 High / Avg / Median / Low)")
-                st.markdown(
-                    f"""
-                    - **PSA 10 ({psa10_stats['count']} sales):** High **\\${psa10_stats['high']:,.2f}** &nbsp;|&nbsp; Avg **\\${psa10_stats['mean']:,.2f}** &nbsp;|&nbsp; Median **\\${psa10_stats['median']:,.2f}** &nbsp;|&nbsp; 25th-Pct Floor **\\${path_b['floor_25']:,.2f}** &nbsp;|&nbsp; Low **\\${psa10_stats['low']:,.2f}**
-                    - **PSA 9 ({psa9_stats['count']} sales):** High **\\${psa9_stats['high']:,.2f}** &nbsp;|&nbsp; Avg **\\${psa9_stats['mean']:,.2f}** &nbsp;|&nbsp; Median **\\${psa9_stats['median']:,.2f}** &nbsp;|&nbsp; 25th-Pct Floor **\\${psa9_stats['floor_25']:,.2f}** &nbsp;|&nbsp; Low **\\${psa9_stats['low']:,.2f}**
-                    """
-                )
-                st.markdown("#### 1. PSA 10 Net Payout & Max Buy Price Math")
-                st.markdown(
-                    f"""
-                    - **30-Day PSA 10 {anchor_label} Anchor:** \\${path_b['median']:,.2f} ({psa10_stats['count']} sales)
-                    - **Less eBay Final Value Fee (13.25%):** -\\${path_b['ebay_fee_median']:,.2f}
-                    - **Less Outbound Bubble Mailer & Supplies:** -\\${path_b['shipping_cost']:,.2f}
-                    - **Less PSA All-In Grading Cost:** -\\${path_b['grading_cost']:,.2f} (\\$39.99 Value + \\$7.01 insured ship/prep)
-                    - **Equals Net Payout:** **\\${path_b['net_payout']:,.2f}**
-                    - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_b['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_b['max_buy']:,.2f} Max All-In Buy**
-                    """
-                )
-                st.markdown("#### 2. PSA 9 Bailout Arithmetic")
-                st.markdown(
-                    f"""
-                    - **30-Day PSA 9 Median:** \\${bailout_9['psa9_median']:,.2f} ({psa9_stats['count']} sales)
-                    - **Less eBay Fee (13.25%):** -\\${bailout_9['ebay_fee_psa9']:,.2f}
-                    - **Less Mailer (\\$4.50) & PSA Grading (\\$47.00):** -\\$51.50
-                    - **PSA 9 Net Payout (Zero-Risk Breakeven Buy Cap):** **\\${bailout_9['breakeven_buy_cap']:,.2f}**
-                    - **Net Result if Bought at Path B Max Buy (\\${path_b['max_buy']:,.2f}):** **\\${bailout_9['bailout_profit_loss']:+,.2f}**
-                    """
-                )
-                st.markdown("#### 3. 25th-Percentile PSA 10 Floor Stress Test")
-                floor_b_status = "PROFIT" if path_b["floor_profit_loss"] >= 0 else "LOSS"
-                st.markdown(
-                    f"""
-                    *If you buy at Path B Max Buy (\\${path_b['max_buy']:,.2f}), hit a PSA 10, and are forced to exit at the 25th-percentile PSA 10 floor (\\${path_b['floor_25']:,.2f}):*
-                    - **PSA 10 Floor Net Payout:** \\${path_b['net_payout_floor']:,.2f}
-                    - **Worst-Case PSA 10 Net {floor_b_status}:** **\\${path_b['floor_profit_loss']:+,.2f}**
-                    """
-                )
-
-else:
-    # --- PATH C — ANY-GRADE SLAB-TO-SLAB FLIP ---
-    slab_sales = card_sales_data.get(detected_condition, [])
-    slab_stats = compute_comp_stats(slab_sales)
-
+elif data_mode == "eBay Live Listings (Buy Side)":
     st.markdown(
-        f"""
-        <div class="comp-metadata-bar">
-            <b>TARGET CARD:</b> {selected_card_title}<br>
-            <b>DETECTED CONDITION / GRADE:</b> <span style="color:#f43f5e;font-weight:700;">{detected_condition} (GRADED SLAB)</span> &nbsp;&bull;&nbsp;
-            <b>30-DAY LIQUIDITY:</b> <span style="color:#c084fc;font-weight:700;">{slab_stats['count']} {detected_condition} sales</span> &nbsp;&bull;&nbsp;
-            <b>TARGET ROI:</b> <span style="color:#4ade80;font-weight:700;">{target_roi_pct}%</span>
-        </div>
-        """,
+        brand_heading(ICON_PATH_A, "Buy Side — Live Listings vs. Your Buy Ceiling", size_rem=1.22, icon_px=30),
         unsafe_allow_html=True,
     )
-
-    path_c = evaluate_standard_path(
-        median_price=slab_stats[anchor_key],
-        floor_price=slab_stats["floor_25"],
-        target_roi_decimal=target_roi_decimal,
-        include_grading=False,
+    st.caption(
+        "Pulls the 30-day sold comps for your search automatically, then scores every active eBay listing "
+        "against your Path A / Path B / Slab buy ceilings."
     )
+    if "buy_query" not in st.session_state:
+        st.session_state.buy_query = ""
 
-    with st.container(border=True):
+    bq1, bq2, bq3 = st.columns([2.1, 1.0, 0.9])
+    with bq1:
+        buy_query = st.text_input(
+            "Search Card",
+            placeholder="e.g. 2023 Prizm Bijan Robinson Silver 305",
+            key="buy_query",
+            help="Starts blank to save API tokens. Type a card and press Enter, or click Bijan Silver #305.",
+        )
+    with bq2:
+        buy_grade = st.selectbox(
+            "Valuation Grade (drives Tier 1)",
+            options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
+            index=0,
+            key="buy_grade",
+        )
+    with bq3:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        st.button(
+            "⚡ Bijan Silver #305",
+            key="load_bijan_buy",
+            use_container_width=True,
+            on_click=lambda: st.session_state.update({"buy_query": "2023 Prizm Bijan Robinson Silver 305"}),
+        )
+
+    bf1, bf2, bf3, bf4 = st.columns(4)
+    with bf1:
+        buy_auto = st.selectbox("Autograph Filter", ["Non-Auto Only", "Autographs Only", "All"], key="buy_auto")
+    with bf2:
+        buy_sort = st.selectbox("Sort", ["Price + Shipping: Lowest First", "Newly Listed", "Best Match"], key="buy_sort")
+    with bf3:
+        buy_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"], key="buy_type")
+    with bf4:
+        buy_show = st.selectbox(
+            "Show",
+            ["Matching Grade Only", "All Grades", "Deals Only"],
+            key="buy_show",
+        )
+    buy_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="buy_excl")
+
+    if not buy_query.strip():
+        st.info("🔎 Enter a card above and press **Enter** (or click **⚡ Bijan Silver #305**) to load Tier 1 buy ceilings & live eBay listings. Blank by default so opening the app uses zero API tokens.")
+    else:
+        with st.spinner("Pulling 30-day comps + live eBay listings..."):
+            deal_res = build_deal_rows(buy_query, buy_excl, buy_auto, True, True, buy_sort, buy_type)
+
+        for e_ in deal_res["errors"]:
+            st.caption(f"⚠️ {e_}")
+
+        render_tier1(deal_res["sales"], buy_grade, buy_query)
+
         st.markdown(
-            brand_heading(ICON_PATH_C, f"PATH C — SLAB-TO-SLAB FLIP ({detected_condition})"),
+            brand_heading(ICON_PATH_B, "Live eBay Listings", size_rem=1.22, icon_px=30),
             unsafe_allow_html=True,
         )
-        st.caption(f"Buy {detected_condition} Slab -> Sell {detected_condition} Slab (Grading cost bypassed: $0.00)")
+        if not deal_res["ok"]:
+            st.error(deal_res["error"])
+        elif not deal_res["rows"]:
+            st.warning("No active listings matched your filters.")
+        else:
+            buy_df = pd.DataFrame(deal_res["rows"])
+            if buy_show == "Matching Grade Only":
+                buy_df = buy_df[buy_df["Grade"] == buy_grade]
+            elif buy_show == "Deals Only":
+                buy_df = buy_df[buy_df["Verdict"].str.startswith(("✅", "🎯"))]
+            deal_count = int(buy_df["Verdict"].str.startswith(("✅", "🎯")).sum()) if len(buy_df) else 0
+            st.caption(f"{len(buy_df)} listings shown • {deal_count} at or under your buy ceiling")
+            st.dataframe(
+                buy_df.drop(columns=["Search"]),
+                width="stretch",
+                hide_index=True,
+                column_config=DEAL_TABLE_CONFIG,
+            )
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(f"30-Day {detected_condition} {anchor_label}", f"${path_c['median']:,.2f}")
-        c2.metric("25th-Pct Conservative Floor", f"${path_c['floor_25']:,.2f}")
-        c3.metric("Net Payout (After Fees/Ship)", f"${path_c['net_payout']:,.2f}")
-        c4.metric(
-            f"Max All-In Buy ({target_roi_pct}% ROI)",
-            f"${path_c['max_buy']:,.2f}",
-            delta=f"+${path_c['expected_profit']:,.2f} Est. Net Profit",
-        )
+elif data_mode == "Deal Finder":
+    st.markdown(
+        brand_heading(ICON_PATH_C, "Deal Finder — Listings At / Under Your Buy Ceiling", size_rem=1.22, icon_px=30),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "One card search per line (max 8). The Cipher pulls 30-day comps and live eBay listings for each, "
+        "then shows only listings priced at or under your Path A / Path B / Slab ceiling."
+    )
+    watchlist_text = st.text_area(
+        "Watchlist (one search per line)",
+        value="2023 Prizm Bijan Robinson Silver 305",
+        height=120,
+        key="df_watchlist",
+    )
+    dfc1, dfc2, dfc3 = st.columns(3)
+    with dfc1:
+        df_auto = st.selectbox("Autograph Filter", ["Non-Auto Only", "Autographs Only", "All"], key="df_auto")
+    with dfc2:
+        df_grades = st.selectbox("Grades", ["All", "Raw only", "Slabs only"], key="df_grades")
+    with dfc3:
+        df_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"], key="df_type")
+    df_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="df_excl")
+    df_deals_only = st.checkbox("Deals only (hide listings over ceiling)", value=True, key="df_deals_only")
 
-        # TIER 2 — Clickable Arithmetic Breakdown (Path C)
-        with st.expander(f"➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path C: {detected_condition})"):
-            st.markdown(f"#### 0. 30-Day {detected_condition} Sales Range (High / Average / Median / Floor / Low)")
-            st.markdown(
-                f"""
-                - **30-Day High Sale:** **\\${slab_stats['high']:,.2f}**
-                - **30-Day Average (Mean):** **\\${slab_stats['mean']:,.2f}**
-                - **30-Day Median (Middle Sale):** **\\${slab_stats['median']:,.2f}** ({slab_stats['count']} sales)
-                - **25th-Percentile Conservative Floor:** **\\${path_c['floor_25']:,.2f}**
-                - **30-Day Low Sale:** **\\${slab_stats['low']:,.2f}**
-                """
-            )
-            st.markdown("#### 1. Net Payout & Max Buy Price Math")
-            st.markdown(
-                f"""
-                - **30-Day {detected_condition} {anchor_label} Anchor:** \\${path_c['median']:,.2f} ({slab_stats['count']} sales)
-                - **Less eBay Final Value Fee (13.25%):** -\\${path_c['ebay_fee_median']:,.2f}
-                - **Less Outbound Bubble Mailer & Supplies:** -\\${path_c['shipping_cost']:,.2f}
-                - **Grading Cost:** \\$0.00 (Already slabbed)
-                - **Equals Net Payout:** **\\${path_c['net_payout']:,.2f}**
-                - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_c['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_c['max_buy']:,.2f} Max All-In Buy**
-                """
-            )
-            st.markdown("#### 2. 25th-Percentile Floor Stress Test")
-            floor_c_status = "PROFIT" if path_c["floor_profit_loss"] >= 0 else "LOSS"
-            st.markdown(
-                f"""
-                *If you buy at the Max All-In Buy (\\${path_c['max_buy']:,.2f}) and are forced to exit at the 25th-percentile floor (\\${path_c['floor_25']:,.2f}):*
-                - **Floor Sale Price:** \\${path_c['floor_25']:,.2f}
-                - **Less eBay Fee (13.25%) & Shipping (\\$4.50):** -\\${path_c['ebay_fee_floor'] + path_c['shipping_cost']:,.2f}
-                - **Floor Net Payout:** \\${path_c['net_payout_floor']:,.2f}
-                - **Worst-Case Net {floor_c_status}:** **\\${path_c['floor_profit_loss']:+,.2f}**
-                """
-            )
+    if st.button("🔎 Run Deal Finder", type="primary"):
+        queries = [q.strip() for q in watchlist_text.splitlines() if q.strip()][:8]
+        all_rows: list[dict] = []
+        scan_errors: list[str] = []
+        prog = st.progress(0.0, text="Scanning...")
+        for i_, q_ in enumerate(queries):
+            prog.progress(i_ / max(len(queries), 1), text=f"Scanning: {q_}")
+            res_ = build_deal_rows(q_, df_excl, df_auto, True, True, "Price + Shipping: Lowest First", df_type)
+            if res_["ok"]:
+                all_rows.extend(res_["rows"])
+            else:
+                scan_errors.append(f"{q_}: {res_['error']}")
+        prog.empty()
+        st.session_state["deal_finder_rows"] = all_rows
+        st.session_state["deal_finder_errors"] = scan_errors
+
+    if "deal_finder_rows" in st.session_state:
+        for e_ in st.session_state.get("deal_finder_errors", []):
+            st.error(e_)
+        rows_ = st.session_state["deal_finder_rows"]
+        if rows_:
+            dfinder = pd.DataFrame(rows_)
+            if df_grades == "Raw only":
+                dfinder = dfinder[dfinder["Grade"] == "Raw"]
+            elif df_grades == "Slabs only":
+                dfinder = dfinder[dfinder["Grade"] != "Raw"]
+            if df_deals_only:
+                dfinder = dfinder[dfinder["Verdict"].str.startswith(("✅", "🎯"))]
+            dfinder = dfinder.sort_values("Room ($)", ascending=False, na_position="last")
+            st.caption(f"{len(dfinder)} listings shown")
+            if dfinder.empty:
+                st.info("No listings at or under your ceiling right now. Try again later or widen the filters.")
+            else:
+                st.dataframe(dfinder, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
+        else:
+            st.info("No active listings found for that watchlist.")
