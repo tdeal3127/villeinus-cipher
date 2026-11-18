@@ -1411,39 +1411,48 @@ def render_card_scanner(
                 if up_b is not None:
                     st.session_state[back_store_key] = up_b.getvalue()
         else:
-            try:
-                from streamlit_back_camera_input import back_camera_input
-
-                use_rear_cam = True
-            except ImportError:
-                back_camera_input = None
-                use_rear_cam = False
-
-            cam_side = st.radio(
-                "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
-                ["1. Snap Front", "2. Snap Back (Optional)"],
-                horizontal=True,
-                key=f"cam_side_{target_query_key}",
+            cam_on = st.toggle(
+                "📸 Start Rear Camera",
+                value=False,
+                key=f"cam_on_{target_query_key}",
+                help="Keeps your phone's camera OFF until you turn this on.",
             )
-            if use_rear_cam:
-                st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
-                if cam_side == "1. Snap Front":
-                    cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}")
-                    if cam_f is not None:
-                        st.session_state[front_store_key] = cam_f.getvalue()
-                else:
-                    cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}")
-                    if cam_b is not None:
-                        st.session_state[back_store_key] = cam_b.getvalue()
+            if not cam_on:
+                st.caption("Camera is **OFF**. Flip **📸 Start Rear Camera** on when you're ready to snap.")
             else:
-                if cam_side == "1. Snap Front":
-                    cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
-                    if cam_f is not None:
-                        st.session_state[front_store_key] = cam_f.getvalue()
+                try:
+                    from streamlit_back_camera_input import back_camera_input
+
+                    use_rear_cam = True
+                except ImportError:
+                    back_camera_input = None
+                    use_rear_cam = False
+
+                cam_side = st.radio(
+                    "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
+                    ["1. Snap Front", "2. Snap Back (Optional)"],
+                    horizontal=True,
+                    key=f"cam_side_{target_query_key}",
+                )
+                if use_rear_cam:
+                    st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                    if cam_side == "1. Snap Front":
+                        cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}")
+                        if cam_f is not None:
+                            st.session_state[front_store_key] = cam_f.getvalue()
+                    else:
+                        cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}")
+                        if cam_b is not None:
+                            st.session_state[back_store_key] = cam_b.getvalue()
                 else:
-                    cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
-                    if cam_b is not None:
-                        st.session_state[back_store_key] = cam_b.getvalue()
+                    if cam_side == "1. Snap Front":
+                        cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
+                        if cam_f is not None:
+                            st.session_state[front_store_key] = cam_f.getvalue()
+                    else:
+                        cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
+                        if cam_b is not None:
+                            st.session_state[back_store_key] = cam_b.getvalue()
 
         front_bytes = st.session_state.get(front_store_key)
         back_bytes = st.session_state.get(back_store_key)
@@ -2120,17 +2129,26 @@ if centering_open:
         key="center_src",
     )
     if c_src == "Web Camera (Rear — Tap to Snap)":
-        try:
-            from streamlit_back_camera_input import back_camera_input
+        ctr_cam_on = st.toggle(
+            "📸 Start Rear Camera",
+            value=False,
+            key="ctr_cam_on",
+            help="Keeps your phone's camera OFF until you turn this on.",
+        )
+        if not ctr_cam_on:
+            st.caption("Camera is **OFF**. Flip **📸 Start Rear Camera** on when you're ready to snap.")
+        else:
+            try:
+                from streamlit_back_camera_input import back_camera_input
 
-            st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
-            c_snap = back_camera_input(height=420, width=360, key=f"center_rcam_{ctr_v}")
-            if c_snap is not None:
-                st.session_state["centering_img_bytes"] = c_snap.getvalue()
-        except ImportError:
-            c_snap = st.camera_input("Snap Straight-On Card Photo", key=f"center_wcam_{ctr_v}")
-            if c_snap is not None:
-                st.session_state["centering_img_bytes"] = c_snap.getvalue()
+                st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                c_snap = back_camera_input(height=420, width=360, key=f"center_rcam_{ctr_v}")
+                if c_snap is not None:
+                    st.session_state["centering_img_bytes"] = c_snap.getvalue()
+            except ImportError:
+                c_snap = st.camera_input("Snap Straight-On Card Photo", key=f"center_wcam_{ctr_v}")
+                if c_snap is not None:
+                    st.session_state["centering_img_bytes"] = c_snap.getvalue()
     else:
         c_up = st.file_uploader("Upload Card Photo", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"center_up_{ctr_v}")
         if c_up is not None:
