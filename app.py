@@ -1345,8 +1345,42 @@ def render_card_scanner(
         front_file = None
         back_file = None
         if src_mode == "Take Photo (Phone Camera)":
+            import streamlit.components.v1 as components
+
+            components.html(
+                """
+                <script>
+                (function() {
+                    try {
+                        const md = window.parent.navigator.mediaDevices;
+                        if (md && !md.__viuRearPatched) {
+                            const origGetUserMedia = md.getUserMedia.bind(md);
+                            md.getUserMedia = function(constraints) {
+                                if (constraints && constraints.video) {
+                                    if (constraints.video === true) {
+                                        constraints = Object.assign({}, constraints, {
+                                            video: { facingMode: { ideal: "environment" } }
+                                        });
+                                    } else if (typeof constraints.video === "object" && !constraints.video.facingMode && !constraints.video.deviceId) {
+                                        constraints = Object.assign({}, constraints, {
+                                            video: Object.assign({}, constraints.video, { facingMode: { ideal: "environment" } })
+                                        });
+                                    }
+                                }
+                                return origGetUserMedia(constraints);
+                            };
+                            md.__viuRearPatched = true;
+                        }
+                    } catch (e) {}
+                })();
+                </script>
+                """,
+                height=0,
+                width=0,
+            )
             front_file = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
-            back_file = st.file_uploader("Optional: Upload Back Photo (for Card #)", type=["jpg", "jpeg", "png", "webp"], key=f"cam_b_{target_query_key}")
+            if st.checkbox("Also Snap Back of Card (for Card #)", value=False, key=f"cam_b_tog_{target_query_key}"):
+                back_file = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
         else:
             uc1, uc2 = st.columns(2)
             with uc1:
