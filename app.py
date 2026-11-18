@@ -2186,78 +2186,211 @@ if centering_open:
                 st.session_state["ctr_ver"] = st.session_state.get("ctr_ver", 0) + 1
                 st.rerun()
 
+        import streamlit.components.v1 as components
+
         img = ImageOps.exif_transpose(Image.open(BytesIO(img_bytes))).convert("RGB")
-        w, h = img.size
+        # Resize for fast, crisp mobile canvas rendering while preserving exact aspect ratio
+        disp_img = img.copy()
+        disp_img.thumbnail((900, 900))
+        buf = BytesIO()
+        disp_img.save(buf, format="JPEG", quality=88)
+        img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        dw, dh = disp_img.size
+        canvas_h = max(360, min(620, int(360 * (dh / max(dw, 1))) + 150))
 
-        col_img, col_ctrl = st.columns([1.25, 1])
-        with col_ctrl:
-            st.markdown("##### ↔️ Left / Right Borders (%) — Tap +/- to Nudge")
-            lr1, lr2 = st.columns(2)
-            with lr1:
-                ol = st.number_input("Outer Left (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ol")
-                il = st.number_input("Inner Left (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_il")
-            with lr2:
-                ir = st.number_input("Inner Right (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ir")
-                or_ = st.number_input("Outer Right (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_or")
+        init_vals = {
+            "ol": float(st.session_state["ctr_ol"]),
+            "il": float(st.session_state["ctr_il"]),
+            "ir": float(st.session_state["ctr_ir"]),
+            "or": float(st.session_state["ctr_or"]),
+            "ot": float(st.session_state["ctr_ot"]),
+            "it": float(st.session_state["ctr_it"]),
+            "ib": float(st.session_state["ctr_ib"]),
+            "ob": float(st.session_state["ctr_ob"]),
+        }
 
-            st.markdown("##### ↕️ Top / Bottom Borders (%) — Tap +/- to Nudge")
-            tb1, tb2 = st.columns(2)
-            with tb1:
-                ot = st.number_input("Outer Top (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ot")
-                it = st.number_input("Inner Top (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_it")
-            with tb2:
-                ib = st.number_input("Inner Bottom (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ib")
-                ob = st.number_input("Outer Bottom (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ob")
+        components.html(
+            f"""
+            <div style="font-family: system-ui, -apple-system, sans-serif; color:#f8fafc; background:#0b0714; border:1px solid #3b1d6e; border-radius:12px; padding:10px; max-width:520px; margin:0 auto;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-bottom:8px; flex-wrap:wrap;">
+                    <div style="background:#160d28; border:1px solid #4c1d95; border-radius:8px; padding:6px 10px; flex:1; text-align:center;">
+                        <div style="font-size:11px; color:#94a3b8;">LEFT / RIGHT</div>
+                        <div id="lrOut" style="font-size:15px; font-weight:800; color:#f8fafc;">--</div>
+                    </div>
+                    <div style="background:#160d28; border:1px solid #4c1d95; border-radius:8px; padding:6px 10px; flex:1; text-align:center;">
+                        <div style="font-size:11px; color:#94a3b8;">TOP / BOTTOM</div>
+                        <div id="tbOut" style="font-size:15px; font-weight:800; color:#f8fafc;">--</div>
+                    </div>
+                    <div style="background:#160d28; border:1px solid #4c1d95; border-radius:8px; padding:6px 10px; flex:1.15; text-align:center;">
+                        <div style="font-size:11px; color:#94a3b8;">PSA 10 / SGC 10</div>
+                        <div id="verdictOut" style="font-size:14px; font-weight:800;">--</div>
+                    </div>
+                </div>
+                <div style="font-size:11px; color:#cbd5e1; text-align:center; margin-bottom:6px;">
+                    👆 <b>Drag any line directly on the card</b> &bull; <span style="color:#38bdf8;">Cyan = Outer Edge</span> &bull; <span style="color:#f43f5e;">Rose = Inner Border</span>
+                </div>
+                <canvas id="ctrCanvas" style="width:100%; height:auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:8px;">
+                    <span id="activeLbl" style="font-size:12px; color:#c084fc; font-weight:700;">Selected: Outer Left</span>
+                    <div style="display:flex; gap:6px;">
+                        <button id="nudgeMinus" style="background:#1e1136; color:#fff; border:1px solid #6d28d9; border-radius:6px; padding:6px 14px; font-weight:700; cursor:pointer;">-0.2%</button>
+                        <button id="nudgePlus" style="background:#1e1136; color:#fff; border:1px solid #6d28d9; border-radius:6px; padding:6px 14px; font-weight:700; cursor:pointer;">+0.2%</button>
+                    </div>
+                </div>
+            </div>
+            <script>
+            (function() {{
+                const canvas = document.getElementById('ctrCanvas');
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                const vals = {json.dumps(init_vals)};
+                const labels = {{
+                    ol: 'Outer Left (Cyan)', il: 'Inner Left (Rose)',
+                    ir: 'Inner Right (Rose)', or: 'Outer Right (Cyan)',
+                    ot: 'Outer Top (Cyan)', it: 'Inner Top (Rose)',
+                    ib: 'Inner Bottom (Rose)', ob: 'Outer Bottom (Cyan)'
+                }};
+                let activeKey = 'ol';
+                let dragging = null;
 
-        draw = ImageDraw.Draw(img)
-        lw = max(2, int(min(w, h) * 0.005))
-        cyan = (56, 189, 248)
-        rose = (244, 63, 94)
+                function clampVal(k, v) {{
+                    if (k === 'ol' || k === 'il' || k === 'ot' || k === 'it') return Math.max(0.5, Math.min(49.5, v));
+                    return Math.max(50.5, Math.min(99.5, v));
+                }}
 
-        for x_pct, col in [(ol, cyan), (il, rose), (ir, rose), (or_, cyan)]:
-            x = int(w * (x_pct / 100.0))
-            draw.line([(x, 0), (x, h)], fill=col, width=lw)
-        for y_pct, col in [(ot, cyan), (it, rose), (ib, rose), (ob, cyan)]:
-            y = int(h * (y_pct / 100.0))
-            draw.line([(0, y), (w, y)], fill=col, width=lw)
+                function updateMetrics() {{
+                    const l = Math.max(0, (vals.il - vals.ol) * canvas.width / 100);
+                    const r = Math.max(0, (vals.or - vals.ir) * canvas.width / 100);
+                    const t = Math.max(0, (vals.it - vals.ot) * canvas.height / 100);
+                    const b = Math.max(0, (vals.ob - vals.it) * canvas.height / 100);
+                    const tb = Math.max(0, (vals.ob - vals.ib) * canvas.height / 100);
+                    const lrSum = l + r;
+                    const tbSum = t + tb;
+                    const lrEl = document.getElementById('lrOut');
+                    const tbEl = document.getElementById('tbOut');
+                    const vEl = document.getElementById('verdictOut');
+                    if (lrSum > 0 && tbSum > 0) {{
+                        const lp = (l / lrSum) * 100, rp = 100 - lp;
+                        const tp = (t / tbSum) * 100, bp = 100 - tp;
+                        lrEl.textContent = lp.toFixed(1) + '% / ' + rp.toFixed(1) + '%';
+                        tbEl.textContent = tp.toFixed(1) + '% / ' + bp.toFixed(1) + '%';
+                        const worst = Math.max(lp, rp, tp, bp);
+                        if (worst <= 55.0) {{
+                            vEl.textContent = '✅ PASS (' + worst.toFixed(1) + '/' + (100 - worst).toFixed(1) + ')';
+                            vEl.style.color = '#4ade80';
+                        }} else if (worst <= 60.0) {{
+                            vEl.textContent = '⚠️ PSA 9 (' + worst.toFixed(1) + '/' + (100 - worst).toFixed(1) + ')';
+                            vEl.style.color = '#facc15';
+                        }} else {{
+                            vEl.textContent = '❌ OFF (' + worst.toFixed(1) + '/' + (100 - worst).toFixed(1) + ')';
+                            vEl.style.color = '#f43f5e';
+                        }}
+                    }} else {{
+                        lrEl.textContent = 'Check Lines';
+                        tbEl.textContent = 'Check Lines';
+                        vEl.textContent = 'Rose inside Cyan';
+                        vEl.style.color = '#facc15';
+                    }}
+                    document.getElementById('activeLbl').textContent = 'Selected: ' + labels[activeKey];
+                }}
 
-        with col_img:
-            st.image(img, caption="Cyan = Outer Card Edge | Rose = Inner Border", width="stretch")
+                function draw() {{
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    const lw = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.005));
+                    const lines = [
+                        ['ol', 'v', '#38bdf8'], ['il', 'v', '#f43f5e'],
+                        ['ir', 'v', '#f43f5e'], ['or', 'v', '#38bdf8'],
+                        ['ot', 'h', '#38bdf8'], ['it', 'h', '#f43f5e'],
+                        ['ib', 'h', '#f43f5e'], ['ob', 'h', '#38bdf8'],
+                    ];
+                    lines.forEach(([k, dir, col]) => {{
+                        ctx.save();
+                        ctx.strokeStyle = col;
+                        ctx.lineWidth = (k === activeKey) ? lw + 2 : lw;
+                        ctx.beginPath();
+                        if (dir === 'v') {{
+                            const x = canvas.width * (vals[k] / 100);
+                            ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height);
+                            ctx.stroke();
+                            ctx.fillStyle = col;
+                            ctx.beginPath(); ctx.arc(x, canvas.height * 0.5, lw * 2.6, 0, Math.PI * 2); ctx.fill();
+                        }} else {{
+                            const y = canvas.height * (vals[k] / 100);
+                            ctx.moveTo(0, y); ctx.lineTo(canvas.width, y);
+                            ctx.stroke();
+                            ctx.fillStyle = col;
+                            ctx.beginPath(); ctx.arc(canvas.width * 0.5, y, lw * 2.6, 0, Math.PI * 2); ctx.fill();
+                        }}
+                        ctx.restore();
+                    }});
+                    updateMetrics();
+                }}
 
-        left_px = max(0.0, (il - ol) * w / 100.0)
-        right_px = max(0.0, (or_ - ir) * w / 100.0)
-        top_px = max(0.0, (it - ot) * h / 100.0)
-        bot_px = max(0.0, (ob - ib) * h / 100.0)
+                function getPos(e) {{
+                    const rect = canvas.getBoundingClientRect();
+                    return {{
+                        x: ((e.clientX - rect.left) / rect.width) * 100,
+                        y: ((e.clientY - rect.top) / rect.height) * 100
+                    }};
+                }}
 
-        lr_sum = left_px + right_px
-        tb_sum = top_px + bot_px
+                canvas.addEventListener('pointerdown', (e) => {{
+                    e.preventDefault();
+                    const p = getPos(e);
+                    let best = null, bestDist = 6.5;
+                    ['ol', 'il', 'ir', 'or'].forEach(k => {{
+                        const d = Math.abs(p.x - vals[k]);
+                        if (d < bestDist) {{ bestDist = d; best = k; }}
+                    }});
+                    ['ot', 'it', 'ib', 'ob'].forEach(k => {{
+                        const d = Math.abs(p.y - vals[k]);
+                        if (d < bestDist) {{ bestDist = d; best = k; }}
+                    }});
+                    if (best) {{
+                        dragging = best;
+                        activeKey = best;
+                        canvas.setPointerCapture(e.pointerId);
+                        draw();
+                    }}
+                }});
 
-        if lr_sum > 0 and tb_sum > 0:
-            l_pct = (left_px / lr_sum) * 100.0
-            r_pct = 100.0 - l_pct
-            t_pct = (top_px / tb_sum) * 100.0
-            b_pct = 100.0 - t_pct
+                canvas.addEventListener('pointermove', (e) => {{
+                    if (!dragging) return;
+                    e.preventDefault();
+                    const p = getPos(e);
+                    const isV = ['ol', 'il', 'ir', 'or'].includes(dragging);
+                    vals[dragging] = clampVal(dragging, isV ? p.x : p.y);
+                    draw();
+                }});
 
-            lr_major = max(l_pct, r_pct)
-            tb_major = max(t_pct, b_pct)
-            worst_major = max(lr_major, tb_major)
+                canvas.addEventListener('pointerup', () => {{ dragging = null; }});
+                canvas.addEventListener('pointercancel', () => {{ dragging = null; }});
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Left / Right", f"{l_pct:.1f}% / {r_pct:.1f}%")
-            m2.metric("Top / Bottom", f"{t_pct:.1f}% / {b_pct:.1f}%")
-            if worst_major <= 55.0:
-                m3.metric("PSA 10 / SGC 10", "✅ PASS", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (≤55/45)")
-            elif worst_major <= 60.0:
-                m3.metric("PSA 10 / SGC 10", "⚠️ PSA 9", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (≤60/40)", delta_color="off")
-            else:
-                m3.metric("PSA 10 / SGC 10", "❌ OFF-CENTER", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (>60/40)", delta_color="inverse")
+                document.getElementById('nudgeMinus').addEventListener('click', () => {{
+                    vals[activeKey] = clampVal(activeKey, vals[activeKey] - 0.2);
+                    draw();
+                }});
+                document.getElementById('nudgePlus').addEventListener('click', () => {{
+                    vals[activeKey] = clampVal(activeKey, vals[activeKey] + 0.2);
+                    draw();
+                }});
 
-            st.caption(
-                "**Thresholds:** PSA 10 & SGC 10 require **55/45** or better on both axes • "
-                "PSA 9 requires **60/40** or better • BGS 9.5 requires **55/45** (50/50 for BGS 10 Black Label)."
-            )
-        else:
-            st.warning("Make sure each **Inner Border (Rose)** sits inside its **Outer Edge (Cyan)**.")
+                img.onload = () => {{
+                    canvas.width = {dw};
+                    canvas.height = {dh};
+                    draw();
+                }};
+                img.src = 'data:image/jpeg;base64,{img_b64}';
+            }})();
+            </script>
+            """,
+            height=canvas_h,
+        )
+        st.caption(
+            "**Thresholds:** PSA 10 & SGC 10 require **55/45** or better on both axes • "
+            "PSA 9 requires **60/40** or better • BGS 9.5 requires **55/45** (50/50 for BGS 10 Black Label)."
+        )
 
 elif not centering_open and data_mode == "Manual / Paste Comps":
     render_tier1(card_sales_data, detected_condition, selected_card_title)
