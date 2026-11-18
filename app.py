@@ -2370,17 +2370,23 @@ elif data_mode == "Centering Checker":
 
         col_img, col_ctrl = st.columns([1.25, 1])
         with col_ctrl:
-            st.markdown("##### ↔️ Left / Right Borders (%)")
-            ol = st.slider("Outer Left Edge (Cyan)", 0.0, 49.0, step=0.2, key="ctr_ol")
-            il = st.slider("Inner Left Border (Rose)", 0.0, 49.0, step=0.2, key="ctr_il")
-            ir = st.slider("Inner Right Border (Rose)", 51.0, 100.0, step=0.2, key="ctr_ir")
-            or_ = st.slider("Outer Right Edge (Cyan)", 51.0, 100.0, step=0.2, key="ctr_or")
+            st.markdown("##### ↔️ Left / Right Borders (%) — Tap +/- to Nudge")
+            lr1, lr2 = st.columns(2)
+            with lr1:
+                ol = st.number_input("Outer Left (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ol")
+                il = st.number_input("Inner Left (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_il")
+            with lr2:
+                ir = st.number_input("Inner Right (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ir")
+                or_ = st.number_input("Outer Right (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_or")
 
-            st.markdown("##### ↕️ Top / Bottom Borders (%)")
-            ot = st.slider("Outer Top Edge (Cyan)", 0.0, 49.0, step=0.2, key="ctr_ot")
-            it = st.slider("Inner Top Border (Rose)", 0.0, 49.0, step=0.2, key="ctr_it")
-            ib = st.slider("Inner Bottom Border (Rose)", 51.0, 100.0, step=0.2, key="ctr_ib")
-            ob = st.slider("Outer Bottom Edge (Cyan)", 51.0, 100.0, step=0.2, key="ctr_ob")
+            st.markdown("##### ↕️ Top / Bottom Borders (%) — Tap +/- to Nudge")
+            tb1, tb2 = st.columns(2)
+            with tb1:
+                ot = st.number_input("Outer Top (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ot")
+                it = st.number_input("Inner Top (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_it")
+            with tb2:
+                ib = st.number_input("Inner Bottom (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ib")
+                ob = st.number_input("Outer Bottom (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ob")
 
         # Draw alignment overlay
         draw = ImageDraw.Draw(img)
