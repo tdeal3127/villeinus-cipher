@@ -1015,13 +1015,21 @@ with st.sidebar:
             "eBay Live Listings (Buy Side)",
             "Deal Finder",
             "Manual / Paste Comps",
-            "Centering Checker",
         ],
         index=0,
     )
 
     st.divider()
-    st.subheader("3. PSA Cert # Slab Scanner")
+    st.subheader("3. Centering Checker")
+    centering_open = st.toggle(
+        "Open Centering Checker",
+        value=False,
+        key="open_centering",
+        help="Switch the main view to the Digital Grading Loupe to measure L/R and T/B card centering.",
+    )
+
+    st.divider()
+    st.subheader("4. PSA Cert # Slab Scanner")
     psa_cert_input = st.text_input(
         "Verify PSA Cert # (e.g. 100855050)",
         placeholder="Enter 8-9 digit Cert #...",
@@ -1572,7 +1580,7 @@ def brand_heading(icon_svg: str, title_text: str, size_rem: float = 1.28, icon_p
 
 
 # Select Card & Listing Condition
-if data_mode == "Live Sold Comps":
+if not centering_open and data_mode == "Live Sold Comps":
     if "comps_query" not in st.session_state:
         st.session_state.comps_query = ""
 
@@ -1766,7 +1774,7 @@ if data_mode == "Live Sold Comps":
                         "**eBay Live Listings (Buy Side)** in the sidebar."
                     )
 
-elif data_mode == "Manual / Paste Comps":
+elif not centering_open and data_mode == "Manual / Paste Comps":
     # Manual / Paste Comps Mode so user can use the tool immediately before eBay API arrives
     col_card, col_cond = st.columns([2.2, 1])
     with col_card:
@@ -2076,12 +2084,172 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
 
 
 # ---------------------------------------------------------------------------
-# MODE ROUTING — Comps summary / Manual valuation / Buy Side / Deal Finder
+# MODE ROUTING — Centering Checker / Comps summary / Manual / Buy Side / Deal Finder
 # ---------------------------------------------------------------------------
-if data_mode == "Live Sold Comps":
-    pass
+if centering_open:
+    from io import BytesIO
+    import json
+    from PIL import Image, ImageDraw, ImageOps
 
-elif data_mode == "Manual / Paste Comps":
+    st.markdown(
+        brand_heading(ICON_TIER1, "Centering Checker — Digital Grading Loupe", size_rem=1.22, icon_px=28),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Hold your phone flat & straight over the card (minimal tilt), tap anywhere on the rear-camera preview to snap, "
+        "then align the **Cyan (Outer Edge)** and **Rose (Inner Border)** lines to measure exact L/R and T/B centering."
+    )
+
+    c_src = st.radio(
+        "Photo Source",
+        ["Web Camera (Rear — Tap to Snap)", "Upload Saved Photo"],
+        horizontal=True,
+        key="center_src",
+    )
+    if c_src == "Web Camera (Rear — Tap to Snap)":
+        try:
+            from streamlit_back_camera_input import back_camera_input
+
+            st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+            c_snap = back_camera_input(height=420, width=360, key="center_rcam")
+            if c_snap is not None:
+                st.session_state["centering_img_bytes"] = c_snap.getvalue()
+        except ImportError:
+            c_snap = st.camera_input("Snap Straight-On Card Photo", key="center_wcam")
+            if c_snap is not None:
+                st.session_state["centering_img_bytes"] = c_snap.getvalue()
+    else:
+        c_up = st.file_uploader("Upload Card Photo", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key="center_up")
+        if c_up is not None:
+            st.session_state["centering_img_bytes"] = c_up.getvalue()
+
+    img_bytes = st.session_state.get("centering_img_bytes")
+    if not img_bytes:
+        st.info("📷 Snap or upload a straight-on photo of your card above to measure centering.")
+    else:
+        defaults = {
+            "ctr_ol": 15.0, "ctr_il": 22.0, "ctr_ir": 78.0, "ctr_or": 85.0,
+            "ctr_ot": 10.0, "ctr_it": 17.0, "ctr_ib": 83.0, "ctr_ob": 90.0,
+        }
+        for k_, v_ in defaults.items():
+            if k_ not in st.session_state:
+                st.session_state[k_] = v_
+
+        b_col1, b_col2 = st.columns([1.4, 1])
+        with b_col1:
+            gem_key = get_secret_key("GEMINI_API_KEY")
+            if gem_key and st.button("✨ Auto-Detect Borders (AI Hint)", key="ctr_ai_btn", use_container_width=True):
+                with st.spinner("Detecting card edges & inner frame..."):
+                    try:
+                        b64_img = base64.b64encode(img_bytes).decode("ascii")
+                        prompt = (
+                            "Locate the sports card's 4 outer edges and 4 inner design/border lines as percentages (0 to 100) "
+                            "of the image width and height. Return ONLY valid JSON with these exact 8 float keys:\n"
+                            '{"outer_left": 15.0, "inner_left": 22.0, "inner_right": 78.0, "outer_right": 85.0, '
+                            '"outer_top": 10.0, "inner_top": 17.0, "inner_bottom": 83.0, "outer_bottom": 90.0}'
+                        )
+                        resp = requests.post(
+                            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={gem_key}",
+                            json={
+                                "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
+                                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0},
+                            },
+                            timeout=25,
+                        )
+                        if resp.status_code == 200:
+                            coords = json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
+                            st.session_state["ctr_ol"] = float(coords.get("outer_left", 15.0))
+                            st.session_state["ctr_il"] = float(coords.get("inner_left", 22.0))
+                            st.session_state["ctr_ir"] = float(coords.get("inner_right", 78.0))
+                            st.session_state["ctr_or"] = float(coords.get("outer_right", 85.0))
+                            st.session_state["ctr_ot"] = float(coords.get("outer_top", 10.0))
+                            st.session_state["ctr_it"] = float(coords.get("inner_top", 17.0))
+                            st.session_state["ctr_ib"] = float(coords.get("inner_bottom", 83.0))
+                            st.session_state["ctr_ob"] = float(coords.get("outer_bottom", 90.0))
+                            st.rerun()
+                        else:
+                            st.warning(f"AI border hint returned HTTP {resp.status_code}; adjust borders manually.")
+                    except Exception as exc:
+                        st.warning(f"AI hint skipped ({exc}); adjust borders manually.")
+        with b_col2:
+            if st.button("🗑️ Clear Photo", key="ctr_clear", use_container_width=True):
+                st.session_state.pop("centering_img_bytes", None)
+                st.rerun()
+
+        img = ImageOps.exif_transpose(Image.open(BytesIO(img_bytes))).convert("RGB")
+        w, h = img.size
+
+        col_img, col_ctrl = st.columns([1.25, 1])
+        with col_ctrl:
+            st.markdown("##### ↔️ Left / Right Borders (%) — Tap +/- to Nudge")
+            lr1, lr2 = st.columns(2)
+            with lr1:
+                ol = st.number_input("Outer Left (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ol")
+                il = st.number_input("Inner Left (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_il")
+            with lr2:
+                ir = st.number_input("Inner Right (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ir")
+                or_ = st.number_input("Outer Right (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_or")
+
+            st.markdown("##### ↕️ Top / Bottom Borders (%) — Tap +/- to Nudge")
+            tb1, tb2 = st.columns(2)
+            with tb1:
+                ot = st.number_input("Outer Top (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ot")
+                it = st.number_input("Inner Top (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_it")
+            with tb2:
+                ib = st.number_input("Inner Bottom (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ib")
+                ob = st.number_input("Outer Bottom (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ob")
+
+        draw = ImageDraw.Draw(img)
+        lw = max(2, int(min(w, h) * 0.005))
+        cyan = (56, 189, 248)
+        rose = (244, 63, 94)
+
+        for x_pct, col in [(ol, cyan), (il, rose), (ir, rose), (or_, cyan)]:
+            x = int(w * (x_pct / 100.0))
+            draw.line([(x, 0), (x, h)], fill=col, width=lw)
+        for y_pct, col in [(ot, cyan), (it, rose), (ib, rose), (ob, cyan)]:
+            y = int(h * (y_pct / 100.0))
+            draw.line([(0, y), (w, y)], fill=col, width=lw)
+
+        with col_img:
+            st.image(img, caption="Cyan = Outer Card Edge | Rose = Inner Border", width="stretch")
+
+        left_px = max(0.0, (il - ol) * w / 100.0)
+        right_px = max(0.0, (or_ - ir) * w / 100.0)
+        top_px = max(0.0, (it - ot) * h / 100.0)
+        bot_px = max(0.0, (ob - ib) * h / 100.0)
+
+        lr_sum = left_px + right_px
+        tb_sum = top_px + bot_px
+
+        if lr_sum > 0 and tb_sum > 0:
+            l_pct = (left_px / lr_sum) * 100.0
+            r_pct = 100.0 - l_pct
+            t_pct = (top_px / tb_sum) * 100.0
+            b_pct = 100.0 - t_pct
+
+            lr_major = max(l_pct, r_pct)
+            tb_major = max(t_pct, b_pct)
+            worst_major = max(lr_major, tb_major)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Left / Right", f"{l_pct:.1f}% / {r_pct:.1f}%")
+            m2.metric("Top / Bottom", f"{t_pct:.1f}% / {b_pct:.1f}%")
+            if worst_major <= 55.0:
+                m3.metric("PSA 10 / SGC 10", "✅ PASS", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (≤55/45)")
+            elif worst_major <= 60.0:
+                m3.metric("PSA 10 / SGC 10", "⚠️ PSA 9", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (≤60/40)", delta_color="off")
+            else:
+                m3.metric("PSA 10 / SGC 10", "❌ OFF-CENTER", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (>60/40)", delta_color="inverse")
+
+            st.caption(
+                "**Thresholds:** PSA 10 & SGC 10 require **55/45** or better on both axes • "
+                "PSA 9 requires **60/40** or better • BGS 9.5 requires **55/45** (50/50 for BGS 10 Black Label)."
+            )
+        else:
+            st.warning("Make sure each **Inner Border (Rose)** sits inside its **Outer Edge (Cyan)**.")
+
+elif not centering_open and data_mode == "Manual / Paste Comps":
     render_tier1(card_sales_data, detected_condition, selected_card_title)
 
 elif data_mode == "eBay Live Listings (Buy Side)":
@@ -2273,169 +2441,3 @@ elif data_mode == "Deal Finder":
                 st.dataframe(dfinder, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
         else:
             st.info("No active listings found for that watchlist.")
-
-elif data_mode == "Centering Checker":
-    from io import BytesIO
-    import json
-    from PIL import Image, ImageDraw, ImageOps
-
-    st.markdown(
-        brand_heading(ICON_TIER1, "Centering Checker — Digital Grading Loupe", size_rem=1.22, icon_px=28),
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Hold your phone flat & straight over the card (minimal tilt), tap anywhere on the rear-camera preview to snap, "
-        "then align the **Cyan (Outer Edge)** and **Rose (Inner Border)** lines to measure exact L/R and T/B centering."
-    )
-
-    c_src = st.radio(
-        "Photo Source",
-        ["Web Camera (Rear — Tap to Snap)", "Upload Saved Photo"],
-        horizontal=True,
-        key="center_src",
-    )
-    if c_src == "Web Camera (Rear — Tap to Snap)":
-        try:
-            from streamlit_back_camera_input import back_camera_input
-
-            st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
-            c_snap = back_camera_input(height=420, width=360, key="center_rcam")
-            if c_snap is not None:
-                st.session_state["centering_img_bytes"] = c_snap.getvalue()
-        except ImportError:
-            c_snap = st.camera_input("Snap Straight-On Card Photo", key="center_wcam")
-            if c_snap is not None:
-                st.session_state["centering_img_bytes"] = c_snap.getvalue()
-    else:
-        c_up = st.file_uploader("Upload Card Photo", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key="center_up")
-        if c_up is not None:
-            st.session_state["centering_img_bytes"] = c_up.getvalue()
-
-    img_bytes = st.session_state.get("centering_img_bytes")
-    if not img_bytes:
-        st.info("📷 Snap or upload a straight-on photo of your card above to measure centering.")
-    else:
-        # Default border positions (% of image width / height)
-        defaults = {
-            "ctr_ol": 15.0, "ctr_il": 22.0, "ctr_ir": 78.0, "ctr_or": 85.0,
-            "ctr_ot": 10.0, "ctr_it": 17.0, "ctr_ib": 83.0, "ctr_ob": 90.0,
-        }
-        for k_, v_ in defaults.items():
-            if k_ not in st.session_state:
-                st.session_state[k_] = v_
-
-        b_col1, b_col2 = st.columns([1.4, 1])
-        with b_col1:
-            gem_key = get_secret_key("GEMINI_API_KEY")
-            if gem_key and st.button("✨ Auto-Detect Borders (AI Hint)", key="ctr_ai_btn", use_container_width=True):
-                with st.spinner("Detecting card edges & inner frame..."):
-                    try:
-                        b64_img = base64.b64encode(img_bytes).decode("ascii")
-                        prompt = (
-                            "Locate the sports card's 4 outer edges and 4 inner design/border lines as percentages (0 to 100) "
-                            "of the image width and height. Return ONLY valid JSON with these exact 8 float keys:\n"
-                            '{"outer_left": 15.0, "inner_left": 22.0, "inner_right": 78.0, "outer_right": 85.0, '
-                            '"outer_top": 10.0, "inner_top": 17.0, "inner_bottom": 83.0, "outer_bottom": 90.0}'
-                        )
-                        resp = requests.post(
-                            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={gem_key}",
-                            json={
-                                "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
-                                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0},
-                            },
-                            timeout=25,
-                        )
-                        if resp.status_code == 200:
-                            coords = json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
-                            st.session_state["ctr_ol"] = float(coords.get("outer_left", 15.0))
-                            st.session_state["ctr_il"] = float(coords.get("inner_left", 22.0))
-                            st.session_state["ctr_ir"] = float(coords.get("inner_right", 78.0))
-                            st.session_state["ctr_or"] = float(coords.get("outer_right", 85.0))
-                            st.session_state["ctr_ot"] = float(coords.get("outer_top", 10.0))
-                            st.session_state["ctr_it"] = float(coords.get("inner_top", 17.0))
-                            st.session_state["ctr_ib"] = float(coords.get("inner_bottom", 83.0))
-                            st.session_state["ctr_ob"] = float(coords.get("outer_bottom", 90.0))
-                            st.rerun()
-                        else:
-                            st.warning(f"AI border hint returned HTTP {resp.status_code}; adjust sliders manually.")
-                    except Exception as exc:
-                        st.warning(f"AI hint skipped ({exc}); adjust sliders manually.")
-        with b_col2:
-            if st.button("🗑️ Clear Photo", key="ctr_clear", use_container_width=True):
-                st.session_state.pop("centering_img_bytes", None)
-                st.rerun()
-
-        img = ImageOps.exif_transpose(Image.open(BytesIO(img_bytes))).convert("RGB")
-        w, h = img.size
-
-        col_img, col_ctrl = st.columns([1.25, 1])
-        with col_ctrl:
-            st.markdown("##### ↔️ Left / Right Borders (%) — Tap +/- to Nudge")
-            lr1, lr2 = st.columns(2)
-            with lr1:
-                ol = st.number_input("Outer Left (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ol")
-                il = st.number_input("Inner Left (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_il")
-            with lr2:
-                ir = st.number_input("Inner Right (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ir")
-                or_ = st.number_input("Outer Right (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_or")
-
-            st.markdown("##### ↕️ Top / Bottom Borders (%) — Tap +/- to Nudge")
-            tb1, tb2 = st.columns(2)
-            with tb1:
-                ot = st.number_input("Outer Top (Cyan)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_ot")
-                it = st.number_input("Inner Top (Rose)", 0.0, 49.0, step=0.2, format="%.1f", key="ctr_it")
-            with tb2:
-                ib = st.number_input("Inner Bottom (Rose)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ib")
-                ob = st.number_input("Outer Bottom (Cyan)", 51.0, 100.0, step=0.2, format="%.1f", key="ctr_ob")
-
-        # Draw alignment overlay
-        draw = ImageDraw.Draw(img)
-        lw = max(2, int(min(w, h) * 0.005))
-        cyan = (56, 189, 248)
-        rose = (244, 63, 94)
-
-        for x_pct, col in [(ol, cyan), (il, rose), (ir, rose), (or_, cyan)]:
-            x = int(w * (x_pct / 100.0))
-            draw.line([(x, 0), (x, h)], fill=col, width=lw)
-        for y_pct, col in [(ot, cyan), (it, rose), (ib, rose), (ob, cyan)]:
-            y = int(h * (y_pct / 100.0))
-            draw.line([(0, y), (w, y)], fill=col, width=lw)
-
-        with col_img:
-            st.image(img, caption="Cyan = Outer Card Edge | Rose = Inner Border", width="stretch")
-
-        # Exact Pixel Ratio Calculation
-        left_px = max(0.0, (il - ol) * w / 100.0)
-        right_px = max(0.0, (or_ - ir) * w / 100.0)
-        top_px = max(0.0, (it - ot) * h / 100.0)
-        bot_px = max(0.0, (ob - ib) * h / 100.0)
-
-        lr_sum = left_px + right_px
-        tb_sum = top_px + bot_px
-
-        if lr_sum > 0 and tb_sum > 0:
-            l_pct = (left_px / lr_sum) * 100.0
-            r_pct = 100.0 - l_pct
-            t_pct = (top_px / tb_sum) * 100.0
-            b_pct = 100.0 - t_pct
-
-            lr_major = max(l_pct, r_pct)
-            tb_major = max(t_pct, b_pct)
-            worst_major = max(lr_major, tb_major)
-
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Left / Right", f"{l_pct:.1f}% / {r_pct:.1f}%")
-            m2.metric("Top / Bottom", f"{t_pct:.1f}% / {b_pct:.1f}%")
-            if worst_major <= 55.0:
-                m3.metric("PSA 10 / SGC 10", "✅ PASS", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (≤55/45)")
-            elif worst_major <= 60.0:
-                m3.metric("PSA 10 / SGC 10", "⚠️ PSA 9", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (≤60/40)", delta_color="off")
-            else:
-                m3.metric("PSA 10 / SGC 10", "❌ OFF-CENTER", delta=f"Worst: {worst_major:.1f}/{100-worst_major:.1f} (>60/40)", delta_color="inverse")
-
-            st.caption(
-                "**Thresholds:** PSA 10 & SGC 10 require **55/45** or better on both axes • "
-                "PSA 9 requires **60/40** or better • BGS 9.5 requires **55/45** (50/50 for BGS 10 Black Label)."
-            )
-        else:
-            st.warning("Make sure each **Inner Border (Rose)** sits inside its **Outer Edge (Cyan)**.")
