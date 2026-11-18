@@ -1259,6 +1259,141 @@ def render_marketplace_links(query: str) -> None:
         st.link_button("MySlabs ↗", f"https://www.myslabs.com/search/all/?q={enc}", use_container_width=True)
 
 
+def identify_card_from_photo(front_bytes: bytes, back_bytes: bytes | None, api_key: str) -> dict:
+    """Use Gemini 2.5 Flash Vision API to identify card details and build a concise CompSniper search string."""
+    import json
+
+    parts = [
+        {
+            "text": (
+                "You are a sports & trading card expert. Inspect the card image(s) (front, and optional back for card #) "
+                "and return ONLY valid JSON with these exact keys:\n"
+                '{"search_query": "<concise search: Year Brand/Set Player Parallel CardNumber, e.g. 2023 Prizm Bijan Robinson Silver 305>", '
+                '"condition": "<one of: Raw, PSA 10, PSA 9, BGS 9.5, SGC 10>", '
+                '"is_auto": <true or false>, '
+                '"cert_number": "<numeric slab cert number if graded and visible, else empty string>", '
+                '"notes": "<1 short sentence describing what you see, including parallel/serial/auto cues>"}\n'
+                "Keep search_query short (5-7 words max, no punctuation like #). Only include 'Silver' or another parallel if clearly visible."
+            )
+        },
+        {
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": base64.b64encode(front_bytes).decode("ascii"),
+            }
+        },
+    ]
+    if back_bytes:
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": base64.b64encode(back_bytes).decode("ascii"),
+                }
+            }
+        )
+
+    try:
+        resp = None
+        for model_name in ("gemini-3-flash-preview", "gemini-flash-latest"):
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}",
+                json={
+                    "contents": [{"parts": parts}],
+                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                break
+        if resp is None or resp.status_code != 200:
+            code = resp.status_code if resp is not None else "N/A"
+            body = resp.text[:200] if resp is not None else ""
+            return {"ok": False, "error": f"Gemini API HTTP {code}: {body}"}
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(text)
+        return {"ok": True, "data": parsed}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def render_card_scanner(
+    target_query_key: str,
+    target_grade_key: str | None = None,
+    target_auto_key: str | None = None,
+) -> None:
+    """Phone camera / photo upload card & slab scanner with confirm-before-comping safeguard."""
+    scan_state_key = f"scan_res_{target_query_key}"
+    confirm_input_key = f"scan_confirm_{target_query_key}"
+
+    with st.expander("📷 Scan Card or Slab (Phone Camera / Photo)", expanded=False):
+        gem_key = get_secret_key("GEMINI_API_KEY")
+        if not gem_key:
+            st.info(
+                "🔑 **Add a free `GEMINI_API_KEY` to Secrets to enable Photo Scanning:**\n\n"
+                "1. Grab a free API key at **https://aistudio.google.com/apikey**\n"
+                "2. Add `GEMINI_API_KEY = \"your_key_here\"` to `.streamlit/secrets.toml` (and Streamlit Cloud → Settings → Secrets)."
+            )
+            return
+
+        src_mode = st.radio(
+            "Photo Source",
+            ["Take Photo (Phone Camera)", "Upload Photo(s)"],
+            horizontal=True,
+            key=f"scan_src_{target_query_key}",
+        )
+        front_file = None
+        back_file = None
+        if src_mode == "Take Photo (Phone Camera)":
+            front_file = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
+            back_file = st.file_uploader("Optional: Upload Back Photo (for Card #)", type=["jpg", "jpeg", "png", "webp"], key=f"cam_b_{target_query_key}")
+        else:
+            uc1, uc2 = st.columns(2)
+            with uc1:
+                front_file = st.file_uploader("Front of Card / Slab", type=["jpg", "jpeg", "png", "webp"], key=f"up_f_{target_query_key}")
+            with uc2:
+                back_file = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp"], key=f"up_b_{target_query_key}")
+
+        if front_file is not None and st.button("🔍 Identify Card from Photo", key=f"scan_go_{target_query_key}", type="primary"):
+            with st.spinner("Reading card details with Vision AI..."):
+                res = identify_card_from_photo(
+                    front_file.getvalue(),
+                    back_file.getvalue() if back_file is not None else None,
+                    gem_key,
+                )
+            if res["ok"]:
+                st.session_state[scan_state_key] = res["data"]
+                st.session_state[confirm_input_key] = str(res["data"].get("search_query") or "")
+            else:
+                st.error(res["error"])
+
+        if scan_state_key in st.session_state:
+            d = st.session_state[scan_state_key]
+            cond_det = str(d.get("condition") or "Raw")
+            if cond_det not in ("Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"):
+                cond_det = "Raw"
+            auto_det = "Autographs Only" if d.get("is_auto") else "Non-Auto Only"
+            cert_det = str(d.get("cert_number") or "").strip()
+
+            st.success(f"**Detected:** `{cond_det}` | `{auto_det}`" + (f" | Cert `#{cert_det}`" if cert_det else "") + f"\n\n_{d.get('notes', '')}_")
+            confirmed_q = st.text_input("Confirm or Tweak Search Before Running Comps", key=confirm_input_key)
+
+            def _apply_scan() -> None:
+                upd = {target_query_key: st.session_state.get(confirm_input_key, "").strip()}
+                if target_grade_key:
+                    upd[target_grade_key] = cond_det
+                if target_auto_key:
+                    upd[target_auto_key] = auto_det
+                st.session_state.update(upd)
+
+            st.button(
+                "✅ Use This Search & Pull Comps",
+                key=f"scan_apply_{target_query_key}",
+                type="primary",
+                on_click=_apply_scan,
+            )
+
+
 live_records: list[dict] = []
 
 # ---------------------------------------------------------------------------
@@ -1351,6 +1486,8 @@ if data_mode == "Live Sold Comps":
     if "comps_query" not in st.session_state:
         st.session_state.comps_query = ""
 
+    render_card_scanner("comps_query", target_auto_key="comps_auto")
+
     qc1, qc2 = st.columns([3.4, 1.1])
     with qc1:
         selected_card_title = st.text_input(
@@ -1375,6 +1512,7 @@ if data_mode == "Live Sold Comps":
             "Autograph Filter",
             options=["Non-Auto Only", "Autographs Only", "All"],
             index=0,
+            key="comps_auto",
             help="Separates True Silver Non-Autos from True Silver Autographs that share the same card #.",
         )
     with fcol2:
@@ -1867,6 +2005,8 @@ elif data_mode == "eBay Live Listings (Buy Side)":
     )
     if "buy_query" not in st.session_state:
         st.session_state.buy_query = ""
+
+    render_card_scanner("buy_query", target_grade_key="buy_grade", target_auto_key="buy_auto")
 
     bq1, bq2, bq3 = st.columns([2.1, 1.0, 0.9])
     with bq1:
