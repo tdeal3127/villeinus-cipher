@@ -963,8 +963,27 @@ if not st.session_state.vault_unlocked:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar Controls — Brand Logo, Margin Control & Data Source Mode
+# Sidebar Controls — Brand Logo & Numbered Navigation Sections
 # ---------------------------------------------------------------------------
+if "target_roi_pct" not in st.session_state:
+    st.session_state.target_roi_pct = 10
+if "anchor_mode" not in st.session_state:
+    st.session_state.anchor_mode = "30-Day Median (Spec Default)"
+if "nav_section" not in st.session_state:
+    st.session_state.nav_section = "Sales Data"
+if "sales_submode" not in st.session_state:
+    st.session_state.sales_submode = "Live Sold Comps"
+
+
+def _step_roi(delta: int) -> None:
+    st.session_state.target_roi_pct = max(5, min(100, st.session_state.target_roi_pct + delta))
+
+
+target_roi_pct = int(st.session_state.target_roi_pct)
+target_roi_decimal = target_roi_pct / 100.0
+anchor_key = "mean" if "Average" in st.session_state.anchor_mode else "median"
+anchor_label = "Average" if anchor_key == "mean" else "Median"
+
 with st.sidebar:
     if LOGO_PATH.exists():
         st.image(str(LOGO_PATH), width="stretch")
@@ -974,62 +993,66 @@ with st.sidebar:
     st.caption("THE UNDERGROUND VAULT • COMP & HEIST CALCULATOR")
     st.divider()
 
-    st.subheader("1. Margin Control")
-    if "target_roi_pct" not in st.session_state:
-        st.session_state.target_roi_pct = 10
+    nav = st.session_state.nav_section
 
-    def _step_roi(delta: int) -> None:
-        st.session_state.target_roi_pct = max(5, min(100, st.session_state.target_roi_pct + delta))
-
-    target_roi_pct = st.slider(
-        "Target ROI %",
-        min_value=5,
-        max_value=100,
-        step=1,
-        key="target_roi_pct",
-        help="Default: 25%. Drag the slider or use the -1% / +1% buttons below for exact 1% steps.",
+    st.subheader("1. Sales Data")
+    st.button(
+        "📊 Sales Data",
+        key="nav_sales",
+        type="primary" if nav == "Sales Data" else "secondary",
+        use_container_width=True,
+        on_click=lambda: st.session_state.update({"nav_section": "Sales Data"}),
     )
-    btn_minus, btn_plus = st.columns(2)
-    with btn_minus:
-        st.button("➖ 1%", on_click=_step_roi, args=(-1,), width="stretch")
-    with btn_plus:
-        st.button("➕ 1%", on_click=_step_roi, args=(1,), width="stretch")
-
-    target_roi_decimal = target_roi_pct / 100.0
-
-    valuation_anchor_mode = st.radio(
-        "Primary Valuation Anchor",
-        options=["30-Day Median (Spec Default)", "30-Day Average (Mean)"],
-        index=0,
-        help="Median picks the exact middle sale price (ignores extreme outliers). Average (Mean) adds all sales and divides by count (moves immediately whenever high/low sales are unchecked).",
-    )
-    anchor_key = "mean" if "Average" in valuation_anchor_mode else "median"
-    anchor_label = "Average" if anchor_key == "mean" else "Median"
+    if nav == "Sales Data":
+        st.radio(
+            "Sales Data Source",
+            options=["Live Sold Comps", "Manual / Paste Comps"],
+            key="sales_submode",
+            label_visibility="collapsed",
+        )
 
     st.divider()
-    st.subheader("2. Data Source Mode")
-    data_mode = st.radio(
-        "30-Day Comps Source",
-        options=[
-            "Live Sold Comps",
-            "eBay Live Listings (Buy Side)",
-            "Deal Finder",
-            "Manual / Paste Comps",
-        ],
-        index=0,
+    st.subheader("2. Targets")
+    st.button(
+        "Buy Targets",
+        key="nav_targets",
+        type="primary" if nav == "Targets" else "secondary",
+        use_container_width=True,
+        on_click=lambda: st.session_state.update({"nav_section": "Targets"}),
     )
 
     st.divider()
-    st.subheader("3. Centering Checker")
-    centering_open = st.toggle(
-        "Open Centering Checker",
-        value=False,
-        key="open_centering",
-        help="Switch the main view to the Digital Grading Loupe to measure L/R and T/B card centering.",
+    st.subheader("3. Heist Protocol")
+    st.button(
+        "Plan a Heist",
+        key="nav_heist",
+        type="primary" if nav == "Heist Protocol" else "secondary",
+        use_container_width=True,
+        on_click=lambda: st.session_state.update({"nav_section": "Heist Protocol"}),
     )
 
     st.divider()
-    st.subheader("4. PSA Cert # Slab Scanner")
+    st.subheader("4. Centering Checker")
+    st.button(
+        "📐 Centering Checker",
+        key="nav_centering",
+        type="primary" if nav == "Centering Checker" else "secondary",
+        use_container_width=True,
+        on_click=lambda: st.session_state.update({"nav_section": "Centering Checker"}),
+    )
+
+    centering_open = nav == "Centering Checker"
+    if nav == "Sales Data":
+        data_mode = st.session_state.sales_submode
+    elif nav == "Targets":
+        data_mode = "eBay Live Listings (Buy Side)"
+    elif nav == "Heist Protocol":
+        data_mode = "Deal Finder"
+    else:
+        data_mode = "Live Sold Comps"
+
+    st.divider()
+    st.subheader("5. PSA Cert # Slab Scanner")
     psa_cert_input = st.text_input(
         "Verify PSA Cert # (e.g. 100855050)",
         placeholder="Enter 8-9 digit Cert #...",
@@ -2517,13 +2540,41 @@ elif data_mode == "eBay Live Listings (Buy Side)":
 
 elif data_mode == "Deal Finder":
     st.markdown(
-        brand_heading(ICON_PATH_C, "Deal Finder — Listings At / Under Your Buy Ceiling", size_rem=1.22, icon_px=30),
+        brand_heading(ICON_PATH_C, "Heist Protocol — Deal Finder & Buy Ceilings", size_rem=1.22, icon_px=30),
         unsafe_allow_html=True,
     )
     st.caption(
-        "One card search per line (max 8). The Cipher pulls 30-day comps and live eBay listings for each, "
-        "then shows only listings priced at or under your Path A / Path B / Slab ceiling."
+        "Set your Target ROI % and watchlist (one search per line, max 8). The Cipher pulls 30-day comps and live eBay listings for each, "
+        "then surfaces listings priced at or under your Path A / Path B / Slab ceiling."
     )
+
+    with st.container(border=True):
+        mc1, mc2, mc3, mc4 = st.columns([2.0, 0.7, 0.7, 1.8])
+        with mc1:
+            st.slider(
+                "Margin Control — Target ROI %",
+                min_value=5,
+                max_value=100,
+                step=1,
+                key="target_roi_pct",
+                help="Default: 10%. Drag or use -1% / +1% for exact 1% steps.",
+            )
+        with mc2:
+            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+            st.button("➖ 1%", on_click=_step_roi, args=(-1,), use_container_width=True)
+        with mc3:
+            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+            st.button("➕ 1%", on_click=_step_roi, args=(1,), use_container_width=True)
+        with mc4:
+            st.radio(
+                "Primary Valuation Anchor",
+                options=["30-Day Median (Spec Default)", "30-Day Average (Mean)"],
+                key="anchor_mode",
+            )
+        target_roi_pct = int(st.session_state.target_roi_pct)
+        target_roi_decimal = target_roi_pct / 100.0
+        anchor_key = "mean" if "Average" in st.session_state.anchor_mode else "median"
+        anchor_label = "Average" if anchor_key == "mean" else "Median"
     watchlist_text = st.text_area(
         "Watchlist (one search per line)",
         value="2023 Prizm Bijan Robinson Silver 305",
@@ -2550,7 +2601,7 @@ elif data_mode == "Deal Finder":
     with dc3:
         df_deals_only = st.checkbox("Deals only (hide listings over ceiling)", value=True, key="df_deals_only")
 
-    if st.button("🔎 Run Deal Finder", type="primary"):
+    if st.button("Perform Heist", type="primary"):
         queries = [q.strip() for q in watchlist_text.splitlines() if q.strip()][:8]
         all_rows: list[dict] = []
         all_sales: dict[str, dict] = {}
