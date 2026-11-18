@@ -176,29 +176,99 @@ def get_active_platform_fee() -> tuple[str, float]:
     return platform, preset
 
 
-PSA_TIERS = {
-    "Value ($39.99 | Max $500)": {"short": "Value", "base": 39.99, "ship_ins": 7.01},
-    "Standard ($59.99 | Max $1,000)": {"short": "Standard", "base": 59.99, "ship_ins": 10.01},
-    "Priority ($79.99 | Max $1,500)": {"short": "Priority", "base": 79.99, "ship_ins": 12.01},
-    "Express ($199.00 | Max $2,500)": {"short": "Express", "base": 199.00, "ship_ins": 20.00},
-    "Super Express ($349.00 | Max $5,000)": {"short": "Super Express", "base": 349.00, "ship_ins": 30.00},
-    "Premier ($599.00 | Max $10,000)": {"short": "Premier", "base": 599.00, "ship_ins": 40.00},
-    "Custom": {"short": "Custom", "base": 39.99, "ship_ins": 7.01},
+DEFAULT_GRADING_TIERS = {
+    "PSA": {
+        "Value ($39.99 | Max $500 | 90-100 bd | Open)": {
+            "short": "Value", "base": 39.99, "ship_ins": 7.01, "turnaround": "90-100 bd", "status": "Open",
+        },
+        "Value Bulk (Paused | Check PSA)": {
+            "short": "Value Bulk", "base": 24.99, "ship_ins": 5.01, "turnaround": "Paused", "status": "Paused",
+        },
+        "Standard ($59.99 | Max $1,000 | 70-80 bd | Open)": {
+            "short": "Standard", "base": 59.99, "ship_ins": 10.01, "turnaround": "70-80 bd", "status": "Open",
+        },
+        "Priority ($79.99 | Max $1,500 | 50-60 bd | Open)": {
+            "short": "Priority", "base": 79.99, "ship_ins": 12.01, "turnaround": "50-60 bd", "status": "Open",
+        },
+        "Express ($199.00 | Max $2,500 | 20-30 bd | Open)": {
+            "short": "Express", "base": 199.00, "ship_ins": 20.00, "turnaround": "20-30 bd", "status": "Open",
+        },
+        "Super Express ($349.00 | Max $5,000 | 10-15 bd | Open)": {
+            "short": "Super Express", "base": 349.00, "ship_ins": 30.00, "turnaround": "10-15 bd", "status": "Open",
+        },
+        "Premier ($599.00 | Max $10,000 | 7-10 bd | Open)": {
+            "short": "Premier", "base": 599.00, "ship_ins": 40.00, "turnaround": "7-10 bd", "status": "Open",
+        },
+        "Custom": {
+            "short": "Custom", "base": 39.99, "ship_ins": 7.01, "turnaround": "Custom", "status": "Open",
+        },
+    },
+    "BGS": {
+        "Base — No Subgrades ($14.95 | 90+ bd | Check Availability)": {
+            "short": "Base (No Subs)", "base": 14.95, "ship_ins": 7.05, "turnaround": "90+ bd", "status": "Check Availability",
+        },
+        "Base — With Subgrades ($17.95 | 90+ bd | Check Availability)": {
+            "short": "Base (+Subs)", "base": 17.95, "ship_ins": 7.05, "turnaround": "90+ bd", "status": "Check Availability",
+        },
+        "Standard ($34.95 | 45 bd | Subgrades | Check Availability)": {
+            "short": "Standard", "base": 34.95, "ship_ins": 8.05, "turnaround": "45 bd", "status": "Check Availability",
+        },
+        "Express ($79.95 | 15 bd | Subgrades | Open)": {
+            "short": "Express", "base": 79.95, "ship_ins": 12.05, "turnaround": "15 bd", "status": "Open",
+        },
+        "Priority ($124.95 | 5 bd | Subgrades | Check Availability)": {
+            "short": "Priority", "base": 124.95, "ship_ins": 15.05, "turnaround": "5 bd", "status": "Check Availability",
+        },
+        "Custom": {
+            "short": "Custom", "base": 34.95, "ship_ins": 8.05, "turnaround": "Custom", "status": "Open",
+        },
+    },
 }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def check_grading_live_sync() -> dict[str, bool]:
+    """Attempt lightweight live check of PSA and BGS pricing pages; return availability of live fetch."""
+    urls = {"PSA": "https://www.psacard.com/pricing", "BGS": "https://www.beckett.com/grading"}
+    status_map: dict[str, bool] = {}
+    for company, url in urls.items():
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
+            status_map[company] = r.status_code == 200 and "Just a moment" not in r.text
+        except Exception:
+            status_map[company] = False
+    return status_map
+
+
+def get_active_grading_details() -> dict:
+    """Return active grading company, tier details, and all-in cost from session state."""
+    company = st.session_state.get("grading_company", "PSA")
+    tiers = DEFAULT_GRADING_TIERS.get(company, DEFAULT_GRADING_TIERS["PSA"])
+    default_key = next(iter(tiers.keys()))
+    tier_key = st.session_state.get("psa_tier", default_key)
+    if tier_key not in tiers:
+        tier_key = default_key
+    info = tiers[tier_key]
+    base_fee = float(st.session_state.get("psa_custom_base", info["base"])) if tier_key == "Custom" else float(info["base"])
+    ship_ins = float(st.session_state.get("psa_ship_ins", info["ship_ins"]))
+    base_fee = max(0.0, base_fee)
+    ship_ins = max(0.0, ship_ins)
+    return {
+        "company": company,
+        "tier_key": tier_key,
+        "short": info["short"],
+        "base": base_fee,
+        "ship_ins": ship_ins,
+        "total": round(base_fee + ship_ins, 2),
+        "turnaround": info["turnaround"],
+        "status": info["status"],
+    }
 
 
 def get_active_psa_grading_cost() -> tuple[str, float, float, float]:
     """Return (short_tier_name, base_fee, ship_ins, total_all_in_cost) from session state."""
-    tier_key = st.session_state.get("psa_tier", "Value ($39.99 | Max $500)")
-    info = PSA_TIERS.get(tier_key, PSA_TIERS["Value ($39.99 | Max $500)"])
-    if tier_key == "Custom":
-        base_fee = float(st.session_state.get("psa_custom_base", 39.99))
-    else:
-        base_fee = float(info["base"])
-    ship_ins = float(st.session_state.get("psa_ship_ins", info["ship_ins"]))
-    base_fee = max(0.0, base_fee)
-    ship_ins = max(0.0, ship_ins)
-    return info["short"], base_fee, ship_ins, round(base_fee + ship_ins, 2)
+    d = get_active_grading_details()
+    return d["short"], d["base"], d["ship_ins"], d["total"]
 
 LOGO_PATH = (
     Path(__file__).parent / "logo.png"
@@ -1030,16 +1100,29 @@ if "sell_platform" not in st.session_state:
     st.session_state.sell_platform = "eBay"
 if "custom_fee_pct" not in st.session_state:
     st.session_state.custom_fee_pct = 13.25
+if "grading_company" not in st.session_state:
+    st.session_state.grading_company = "PSA"
 if "psa_tier" not in st.session_state:
-    st.session_state.psa_tier = "Value ($39.99 | Max $500)"
+    st.session_state.psa_tier = next(iter(DEFAULT_GRADING_TIERS["PSA"].keys()))
 if "psa_ship_ins" not in st.session_state:
     st.session_state.psa_ship_ins = 7.01
 if "psa_custom_base" not in st.session_state:
     st.session_state.psa_custom_base = 39.99
 
 
+def _on_grading_company_change() -> None:
+    tiers = DEFAULT_GRADING_TIERS.get(st.session_state.grading_company, DEFAULT_GRADING_TIERS["PSA"])
+    first_key = next(iter(tiers.keys()))
+    st.session_state.psa_tier = first_key
+    info = tiers[first_key]
+    st.session_state.psa_ship_ins = float(info["ship_ins"])
+    st.session_state.psa_custom_base = float(info["base"])
+
+
 def _on_psa_tier_change() -> None:
-    info = PSA_TIERS.get(st.session_state.psa_tier, PSA_TIERS["Value ($39.99 | Max $500)"])
+    tiers = DEFAULT_GRADING_TIERS.get(st.session_state.grading_company, DEFAULT_GRADING_TIERS["PSA"])
+    first_key = next(iter(tiers.keys()))
+    info = tiers.get(st.session_state.psa_tier, tiers[first_key])
     st.session_state.psa_ship_ins = float(info["ship_ins"])
     if st.session_state.psa_tier != "Custom":
         st.session_state.psa_custom_base = float(info["base"])
@@ -2657,17 +2740,26 @@ elif data_mode == "Deal Finder":
                     key="custom_fee_pct",
                 )
         active_platform_name, active_fee_rate = get_active_platform_fee()
-        pt1, pt2, pt3 = st.columns([2.2, 1.2, 1.2])
+        pt0, pt1, pt2, pt3 = st.columns([0.9, 2.3, 1.0, 1.0])
+        with pt0:
+            st.radio(
+                "Grader",
+                options=["PSA", "BGS"],
+                horizontal=True,
+                key="grading_company",
+                on_change=_on_grading_company_change,
+            )
+        active_tiers = DEFAULT_GRADING_TIERS.get(st.session_state.grading_company, DEFAULT_GRADING_TIERS["PSA"])
         with pt1:
             st.selectbox(
-                "PSA Grading Tier (Path B)",
-                options=list(PSA_TIERS.keys()),
+                f"{st.session_state.grading_company} Grading Tier (Path B)",
+                options=list(active_tiers.keys()),
                 key="psa_tier",
                 on_change=_on_psa_tier_change,
             )
         with pt2:
             st.number_input(
-                "PSA Ins. & Ship ($)",
+                "Ins. & Ship ($)",
                 min_value=0.0,
                 max_value=250.0,
                 step=0.50,
@@ -2678,25 +2770,31 @@ elif data_mode == "Deal Finder":
         with pt3:
             if st.session_state.psa_tier == "Custom":
                 st.number_input(
-                    "Custom PSA Fee ($)",
+                    f"Custom {st.session_state.grading_company} ($)",
                     min_value=0.0,
                     max_value=2000.0,
                     step=1.00,
                     format="%.2f",
                     key="psa_custom_base",
                 )
-        psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = get_active_psa_grading_cost()
+        gd = get_active_grading_details()
+        psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = gd["short"], gd["base"], gd["ship_ins"], gd["total"]
+        status_badge = f" • Status: <strong style='color:#4ade80;'>{gd['status']}</strong>" if gd["status"] == "Open" else f" • Status: <strong style='color:#fbbf24;'>{gd['status']}</strong>"
         st.markdown(
             f"""
             <div style="font-size:0.86rem; color:#e2e8f0; background:rgba(147,51,234,0.10); border:1px solid rgba(168,85,247,0.35); border-radius:8px; padding:7px 12px; margin-top:4px;">
                 <span style="color:#c084fc; font-weight:700; letter-spacing:0.04em;">FIXED HEIST OVERHEAD:</span>
                 {active_platform_name} Fee: <strong style="color:#f8fafc;">{active_fee_rate * 100:.2f}%</strong> &nbsp;•&nbsp;
                 Outbound Shipping &amp; Supplies: <strong style="color:#f8fafc;">${OUTBOUND_SHIPPING:.2f}</strong> &nbsp;•&nbsp;
-                PSA All-In Grading ({psa_tier_short}): <strong style="color:#f8fafc;">${psa_total_cost:.2f}</strong>
-                <span style="color:#cbd5e1;">(${psa_base_fee:.2f} tier + ${psa_ship_ins:.2f} ins/ship)</span>
+                {gd['company']} All-In Grading ({psa_tier_short}): <strong style="color:#f8fafc;">${psa_total_cost:.2f}</strong>
+                <span style="color:#cbd5e1;">(${psa_base_fee:.2f} tier + ${psa_ship_ins:.2f} ins/ship • Est. {gd['turnaround']})</span>{status_badge}
             </div>
             """,
             unsafe_allow_html=True,
+        )
+        st.caption(
+            "Verify current pricing & open tiers before submitting: "
+            "[PSA Pricing](https://www.psacard.com/pricing) • [Beckett Grading](https://www.beckett.com/grading)"
         )
     watchlist_text = st.text_area(
         "Watchlist (one search per line)",
