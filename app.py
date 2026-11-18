@@ -1391,15 +1391,19 @@ def render_card_scanner(
         back_bytes = None
         front_store_key = f"cam_front_bytes_{target_query_key}"
         back_store_key = f"cam_back_bytes_{target_query_key}"
+        scan_ver_key = f"scan_ver_{target_query_key}"
+        if scan_ver_key not in st.session_state:
+            st.session_state[scan_ver_key] = 0
+        sv = st.session_state[scan_ver_key]
 
         if src_mode == "Upload Saved Photo(s)":
             uc1, uc2 = st.columns(2)
             with uc1:
-                up_f = st.file_uploader("Front of Card / Slab", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_f_{target_query_key}")
+                up_f = st.file_uploader("Front of Card / Slab", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_f_{target_query_key}_{sv}")
                 if up_f is not None:
                     st.session_state[front_store_key] = up_f.getvalue()
             with uc2:
-                up_b = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_b_{target_query_key}")
+                up_b = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_b_{target_query_key}_{sv}")
                 if up_b is not None:
                     st.session_state[back_store_key] = up_b.getvalue()
         else:
@@ -1454,6 +1458,7 @@ def render_card_scanner(
                 if st.button("🗑️ Clear Photos", key=f"scan_clr_{target_query_key}"):
                     st.session_state.pop(front_store_key, None)
                     st.session_state.pop(back_store_key, None)
+                    st.session_state[scan_ver_key] = st.session_state.get(scan_ver_key, 0) + 1
                     st.rerun()
 
         if front_bytes is not None and st.button("🔍 Identify Card from Photo", key=f"scan_go_{target_query_key}", type="primary"):
@@ -2100,6 +2105,10 @@ if centering_open:
         "then align the **Cyan (Outer Edge)** and **Rose (Inner Border)** lines to measure exact L/R and T/B centering."
     )
 
+    if "ctr_ver" not in st.session_state:
+        st.session_state["ctr_ver"] = 0
+    ctr_v = st.session_state["ctr_ver"]
+
     c_src = st.radio(
         "Photo Source",
         ["Web Camera (Rear — Tap to Snap)", "Upload Saved Photo"],
@@ -2111,15 +2120,15 @@ if centering_open:
             from streamlit_back_camera_input import back_camera_input
 
             st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
-            c_snap = back_camera_input(height=420, width=360, key="center_rcam")
+            c_snap = back_camera_input(height=420, width=360, key=f"center_rcam_{ctr_v}")
             if c_snap is not None:
                 st.session_state["centering_img_bytes"] = c_snap.getvalue()
         except ImportError:
-            c_snap = st.camera_input("Snap Straight-On Card Photo", key="center_wcam")
+            c_snap = st.camera_input("Snap Straight-On Card Photo", key=f"center_wcam_{ctr_v}")
             if c_snap is not None:
                 st.session_state["centering_img_bytes"] = c_snap.getvalue()
     else:
-        c_up = st.file_uploader("Upload Card Photo", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key="center_up")
+        c_up = st.file_uploader("Upload Card Photo", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"center_up_{ctr_v}")
         if c_up is not None:
             st.session_state["centering_img_bytes"] = c_up.getvalue()
 
@@ -2174,6 +2183,7 @@ if centering_open:
         with b_col2:
             if st.button("🗑️ Clear Photo", key="ctr_clear", use_container_width=True):
                 st.session_state.pop("centering_img_bytes", None)
+                st.session_state["ctr_ver"] = st.session_state.get("ctr_ver", 0) + 1
                 st.rerun()
 
         img = ImageOps.exif_transpose(Image.open(BytesIO(img_bytes))).convert("RGB")
