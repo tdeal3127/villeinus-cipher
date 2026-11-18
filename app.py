@@ -1388,13 +1388,11 @@ def render_card_scanner(
             with uc1:
                 up_f = st.file_uploader("Front of Card / Slab", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_f_{target_query_key}")
                 if up_f is not None:
-                    front_bytes = up_f.getvalue()
-                    st.image(front_bytes, width=150)
+                    st.session_state[front_store_key] = up_f.getvalue()
             with uc2:
                 up_b = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_b_{target_query_key}")
                 if up_b is not None:
-                    back_bytes = up_b.getvalue()
-                    st.image(back_bytes, width=150)
+                    st.session_state[back_store_key] = up_b.getvalue()
         else:
             cam_side = st.radio(
                 "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
@@ -1406,15 +1404,29 @@ def render_card_scanner(
                 cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
                 if cam_f is not None:
                     st.session_state[front_store_key] = cam_f.getvalue()
-                    st.success("✅ Front photo captured! Switch to **2. Snap Back** if you need the card #, or click **Identify Card** below.")
             else:
                 cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
                 if cam_b is not None:
                     st.session_state[back_store_key] = cam_b.getvalue()
-                    st.success("✅ Back photo captured!")
 
-            front_bytes = st.session_state.get(front_store_key)
-            back_bytes = st.session_state.get(back_store_key)
+        front_bytes = st.session_state.get(front_store_key)
+        back_bytes = st.session_state.get(back_store_key)
+
+        if front_bytes is not None or back_bytes is not None:
+            pv1, pv2, pv3 = st.columns([1, 1, 1])
+            with pv1:
+                if front_bytes is not None:
+                    st.caption("✅ **Front Attached**")
+                    st.image(front_bytes, width=130)
+            with pv2:
+                if back_bytes is not None:
+                    st.caption("✅ **Back Attached**")
+                    st.image(back_bytes, width=130)
+            with pv3:
+                if st.button("🗑️ Clear Photos", key=f"scan_clr_{target_query_key}"):
+                    st.session_state.pop(front_store_key, None)
+                    st.session_state.pop(back_store_key, None)
+                    st.rerun()
 
         if front_bytes is not None and st.button("🔍 Identify Card from Photo", key=f"scan_go_{target_query_key}", type="primary"):
             with st.spinner("Reading card details with Vision AI..."):
