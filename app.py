@@ -886,6 +886,34 @@ if not st.session_state.vault_unlocked:
                 placeholder="••••",
                 label_visibility="collapsed",
             )
+            import streamlit.components.v1 as components
+
+            components.html(
+                """
+                <script>
+                (function() {
+                    try {
+                        const doc = window.parent.document;
+                        function applyNumericPin() {
+                            doc.querySelectorAll('input[type="password"]').forEach((el) => {
+                                el.setAttribute('inputmode', 'numeric');
+                                el.setAttribute('pattern', '[0-9]*');
+                                el.setAttribute('autocomplete', 'one-time-code');
+                                el.style.textAlign = 'center';
+                                el.style.fontSize = '1.35rem';
+                                el.style.letterSpacing = '0.45em';
+                            });
+                        }
+                        applyNumericPin();
+                        setTimeout(applyNumericPin, 150);
+                        setTimeout(applyNumericPin, 500);
+                    } catch (e) {}
+                })();
+                </script>
+                """,
+                height=0,
+                width=0,
+            )
             unlock_clicked = st.button("🔓 UNLOCK THE CIPHER", width="stretch", type="primary")
             if unlock_clicked or entered_pin:
                 vault_pin = get_secret_key("VAULT_PIN")
