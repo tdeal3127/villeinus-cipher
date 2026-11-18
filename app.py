@@ -1394,20 +1394,39 @@ def render_card_scanner(
                 if up_b is not None:
                     st.session_state[back_store_key] = up_b.getvalue()
         else:
+            try:
+                from streamlit_back_camera_input import back_camera_input
+
+                use_rear_cam = True
+            except ImportError:
+                back_camera_input = None
+                use_rear_cam = False
+
             cam_side = st.radio(
                 "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
                 ["1. Snap Front", "2. Snap Back (Optional)"],
                 horizontal=True,
                 key=f"cam_side_{target_query_key}",
             )
-            if cam_side == "1. Snap Front":
-                cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
-                if cam_f is not None:
-                    st.session_state[front_store_key] = cam_f.getvalue()
+            if use_rear_cam:
+                st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                if cam_side == "1. Snap Front":
+                    cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}")
+                    if cam_f is not None:
+                        st.session_state[front_store_key] = cam_f.getvalue()
+                else:
+                    cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}")
+                    if cam_b is not None:
+                        st.session_state[back_store_key] = cam_b.getvalue()
             else:
-                cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
-                if cam_b is not None:
-                    st.session_state[back_store_key] = cam_b.getvalue()
+                if cam_side == "1. Snap Front":
+                    cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
+                    if cam_f is not None:
+                        st.session_state[front_store_key] = cam_f.getvalue()
+                else:
+                    cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
+                    if cam_b is not None:
+                        st.session_state[back_store_key] = cam_b.getvalue()
 
         front_bytes = st.session_state.get(front_store_key)
         back_bytes = st.session_state.get(back_store_key)
