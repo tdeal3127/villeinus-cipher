@@ -1373,26 +1373,28 @@ def render_card_scanner(
 
         src_mode = st.radio(
             "Photo Source",
-            ["Phone Native Camera / Upload (Rear Camera)", "Web Camera (Live Viewfinder)"],
+            ["Web Camera (Live Viewfinder)", "Upload Saved Photo(s)"],
             horizontal=True,
             key=f"scan_src_{target_query_key}",
-            help="On phones, 'Phone Native Camera / Upload' -> Camera opens your main rear camera with full autofocus. 'Web Camera' uses Streamlit's built-in viewfinder.",
+            help="'Web Camera' stays inside the browser so your phone won't drop the tab. 'Upload Saved Photo(s)' lets you pick existing gallery photos/screenshots.",
         )
         front_bytes = None
         back_bytes = None
         front_store_key = f"cam_front_bytes_{target_query_key}"
         back_store_key = f"cam_back_bytes_{target_query_key}"
 
-        if src_mode == "Phone Native Camera / Upload (Rear Camera)":
+        if src_mode == "Upload Saved Photo(s)":
             uc1, uc2 = st.columns(2)
             with uc1:
-                up_f = st.file_uploader("Front of Card / Slab (Tap → Camera or Photo)", type=["jpg", "jpeg", "png", "webp"], key=f"up_f_{target_query_key}")
+                up_f = st.file_uploader("Front of Card / Slab", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_f_{target_query_key}")
                 if up_f is not None:
                     front_bytes = up_f.getvalue()
+                    st.image(front_bytes, width=150)
             with uc2:
-                up_b = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp"], key=f"up_b_{target_query_key}")
+                up_b = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"up_b_{target_query_key}")
                 if up_b is not None:
                     back_bytes = up_b.getvalue()
+                    st.image(back_bytes, width=150)
         else:
             cam_side = st.radio(
                 "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
