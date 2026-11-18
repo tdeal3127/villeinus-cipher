@@ -856,8 +856,42 @@ def fetch_ebay_active_listings(query: str, app_id: str, cert_id: str, sort: str,
 # ---------------------------------------------------------------------------
 # Restricted Underground Vault PIN Gate (Server-side secret in VAULT_PIN)
 # ---------------------------------------------------------------------------
+def _make_vault_token(pin: str, ttl_sec: int = 600) -> str:
+    """Create a 10-minute HMAC-signed token for this device's browser session."""
+    import hashlib
+
+    exp = int(time.time()) + ttl_sec
+    sig = hmac.new(pin.encode("utf-8"), str(exp).encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return f"{exp}_{sig}"
+
+
+def _verify_vault_token(token: str, pin: str) -> bool:
+    """Verify the 10-minute device token has not expired or been tampered with."""
+    import hashlib
+
+    if not token or not pin or "_" not in token:
+        return False
+    try:
+        exp_str, sig = token.split("_", 1)
+        exp = int(exp_str)
+    except ValueError:
+        return False
+    if time.time() > exp:
+        return False
+    expected = hmac.new(pin.encode("utf-8"), str(exp).encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return hmac.compare_digest(sig, expected)
+
+
 if "vault_unlocked" not in st.session_state:
     st.session_state.vault_unlocked = False
+
+_vt_param = st.query_params.get("vt", "")
+if not st.session_state.vault_unlocked and _vt_param:
+    _v_pin = get_secret_key("VAULT_PIN")
+    if _verify_vault_token(_vt_param, _v_pin):
+        st.session_state.vault_unlocked = True
+    else:
+        st.query_params.pop("vt", None)
 
 if not st.session_state.vault_unlocked:
     _, col_gate, _ = st.columns([1, 1.3, 1])
@@ -921,6 +955,7 @@ if not st.session_state.vault_unlocked:
                     st.error("🚨 Vault PIN is not configured in server secrets (`VAULT_PIN`).")
                 elif hmac.compare_digest(entered_pin.strip(), vault_pin):
                     st.session_state.vault_unlocked = True
+                    st.query_params["vt"] = _make_vault_token(vault_pin, ttl_sec=600)
                     st.rerun()
                 else:
                     st.error("🚨 ACCESS DENIED — Invalid Vault PIN.")
@@ -1338,63 +1373,50 @@ def render_card_scanner(
 
         src_mode = st.radio(
             "Photo Source",
-            ["Take Photo (Phone Camera)", "Upload Photo(s)"],
+            ["Phone Native Camera / Upload (Rear Camera)", "Web Camera (Live Viewfinder)"],
             horizontal=True,
             key=f"scan_src_{target_query_key}",
+            help="On phones, 'Phone Native Camera / Upload' -> Camera opens your main rear camera with full autofocus. 'Web Camera' uses Streamlit's built-in viewfinder.",
         )
-        front_file = None
-        back_file = None
-        if src_mode == "Take Photo (Phone Camera)":
-            import streamlit.components.v1 as components
+        front_bytes = None
+        back_bytes = None
+        front_store_key = f"cam_front_bytes_{target_query_key}"
+        back_store_key = f"cam_back_bytes_{target_query_key}"
 
-            components.html(
-                """
-                <script>
-                (function() {
-                    try {
-                        const md = window.parent.navigator.mediaDevices;
-                        if (md && !md.__viuRearPatched) {
-                            const origGetUserMedia = md.getUserMedia.bind(md);
-                            md.getUserMedia = function(constraints) {
-                                if (constraints && constraints.video) {
-                                    if (constraints.video === true) {
-                                        constraints = Object.assign({}, constraints, {
-                                            video: { facingMode: { ideal: "environment" } }
-                                        });
-                                    } else if (typeof constraints.video === "object" && !constraints.video.facingMode && !constraints.video.deviceId) {
-                                        constraints = Object.assign({}, constraints, {
-                                            video: Object.assign({}, constraints.video, { facingMode: { ideal: "environment" } })
-                                        });
-                                    }
-                                }
-                                return origGetUserMedia(constraints);
-                            };
-                            md.__viuRearPatched = true;
-                        }
-                    } catch (e) {}
-                })();
-                </script>
-                """,
-                height=0,
-                width=0,
-            )
-            front_file = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
-            if st.checkbox("Also Snap Back of Card (for Card #)", value=False, key=f"cam_b_tog_{target_query_key}"):
-                back_file = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
-        else:
+        if src_mode == "Phone Native Camera / Upload (Rear Camera)":
             uc1, uc2 = st.columns(2)
             with uc1:
-                front_file = st.file_uploader("Front of Card / Slab", type=["jpg", "jpeg", "png", "webp"], key=f"up_f_{target_query_key}")
+                up_f = st.file_uploader("Front of Card / Slab (Tap → Camera or Photo)", type=["jpg", "jpeg", "png", "webp"], key=f"up_f_{target_query_key}")
+                if up_f is not None:
+                    front_bytes = up_f.getvalue()
             with uc2:
-                back_file = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp"], key=f"up_b_{target_query_key}")
+                up_b = st.file_uploader("Optional: Back of Card (for Card #)", type=["jpg", "jpeg", "png", "webp"], key=f"up_b_{target_query_key}")
+                if up_b is not None:
+                    back_bytes = up_b.getvalue()
+        else:
+            cam_side = st.radio(
+                "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
+                ["1. Snap Front", "2. Snap Back (Optional)"],
+                horizontal=True,
+                key=f"cam_side_{target_query_key}",
+            )
+            if cam_side == "1. Snap Front":
+                cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
+                if cam_f is not None:
+                    st.session_state[front_store_key] = cam_f.getvalue()
+                    st.success("✅ Front photo captured! Switch to **2. Snap Back** if you need the card #, or click **Identify Card** below.")
+            else:
+                cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
+                if cam_b is not None:
+                    st.session_state[back_store_key] = cam_b.getvalue()
+                    st.success("✅ Back photo captured!")
 
-        if front_file is not None and st.button("🔍 Identify Card from Photo", key=f"scan_go_{target_query_key}", type="primary"):
+            front_bytes = st.session_state.get(front_store_key)
+            back_bytes = st.session_state.get(back_store_key)
+
+        if front_bytes is not None and st.button("🔍 Identify Card from Photo", key=f"scan_go_{target_query_key}", type="primary"):
             with st.spinner("Reading card details with Vision AI..."):
-                res = identify_card_from_photo(
-                    front_file.getvalue(),
-                    back_file.getvalue() if back_file is not None else None,
-                    gem_key,
-                )
+                res = identify_card_from_photo(front_bytes, back_bytes, gem_key)
             if res["ok"]:
                 st.session_state[scan_state_key] = res["data"]
                 st.session_state[confirm_input_key] = str(res["data"].get("search_query") or "")
