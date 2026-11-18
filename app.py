@@ -2196,7 +2196,8 @@ if centering_open:
         disp_img.save(buf, format="JPEG", quality=88)
         img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         dw, dh = disp_img.size
-        canvas_h = max(360, min(620, int(360 * (dh / max(dw, 1))) + 150))
+        rendered_img_h = min(460, int(420 * (dh / max(dw, 1))))
+        canvas_h = rendered_img_h + 185
 
         init_vals = {
             "ol": float(st.session_state["ctr_ol"]),
@@ -2229,7 +2230,7 @@ if centering_open:
                 <div style="font-size:11px; color:#cbd5e1; text-align:center; margin-bottom:6px;">
                     👆 <b>Drag any line directly on the card</b> &bull; <span style="color:#38bdf8;">Cyan = Outer Edge</span> &bull; <span style="color:#f43f5e;">Rose = Inner Border</span>
                 </div>
-                <canvas id="ctrCanvas" style="width:100%; height:auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
+                <canvas id="ctrCanvas" style="max-width:100%; max-height:460px; width:auto; height:auto; margin:0 auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:8px;">
                     <span id="activeLbl" style="font-size:12px; color:#c084fc; font-weight:700;">Selected: Outer Left</span>
                     <div style="display:flex; gap:6px;">
