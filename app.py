@@ -270,6 +270,18 @@ def get_active_psa_grading_cost() -> tuple[str, float, float, float]:
     d = get_active_grading_details()
     return d["short"], d["base"], d["ship_ins"], d["total"]
 
+
+def get_company_grading_cost(company: str) -> tuple[str, float, float, float]:
+    """Return (short_tier_name, base_fee, ship_ins, total_all_in_cost) for a specific grader ('PSA' or 'BGS')."""
+    d = get_active_grading_details()
+    if d["company"] == company:
+        return d["short"], d["base"], d["ship_ins"], d["total"]
+    if company == "BGS":
+        info = DEFAULT_GRADING_TIERS["BGS"]["Express ($79.95 | 15 bd | Subgrades | Open)"]
+        return info["short"], float(info["base"]), float(info["ship_ins"]), round(float(info["base"]) + float(info["ship_ins"]), 2)
+    info = DEFAULT_GRADING_TIERS["PSA"]["Value ($39.99 | Max $500 | 90-100 bd | Open)"]
+    return info["short"], float(info["base"]), float(info["ship_ins"]), round(float(info["base"]) + float(info["ship_ins"]), 2)
+
 LOGO_PATH = (
     Path(__file__).parent / "logo.png"
     if (Path(__file__).parent / "logo.png").exists()
@@ -335,14 +347,20 @@ def evaluate_standard_path(
     target_roi_decimal: float,
     include_grading: bool = False,
     fee_rate: float | None = None,
+    grading_cost_override: float | None = None,
 ) -> dict:
     """
-    Evaluate Path A (Raw-to-Raw), Path B (Raw-to-PSA 10), or Path C (Slab-to-Slab).
+    Evaluate Path A (Raw-to-Raw), Path B (Raw-to-PSA 10 / BGS 9.5), or Path C (Slab-to-Slab).
     Formula from Spec:
-      Net Payout = (30-Day Median * (1 - fee_rate)) - 4.50 [- 47.00 if Path B]
+      Net Payout = (30-Day Median * (1 - fee_rate)) - 4.50 [- grading_cost if Path B]
       Max All-In Buy Price = Net Payout / (1 + Target ROI)
     """
-    grading_cost = get_active_psa_grading_cost()[3] if include_grading else 0.0
+    if not include_grading:
+        grading_cost = 0.0
+    elif grading_cost_override is not None:
+        grading_cost = grading_cost_override
+    else:
+        grading_cost = get_active_psa_grading_cost()[3]
     active_fee = get_active_platform_fee()[1] if fee_rate is None else fee_rate
 
     # Primary Median Valuation Math
@@ -375,15 +393,16 @@ def evaluate_psa9_bailout(
     psa9_median: float,
     path_b_max_buy: float,
     fee_rate: float | None = None,
+    grading_cost_override: float | None = None,
 ) -> dict:
     """
-    PSA 9 Bailout Check (Path B only):
-      Deduct platform fees, $4.50 mailer, and $47.00 PSA cost from 30-day PSA 9 Median.
-      Display exact Net Profit/Loss if bought at Path B Max Buy and graded a PSA 9,
-      plus zero-risk breakeven buy cap (= PSA 9 Net Payout).
+    9-Grade Bailout Check (Path B only — PSA 9 or BGS 9):
+      Deduct platform fees, $4.50 mailer, and grading cost from 30-day 9-grade Median.
+      Display exact Net Profit/Loss if bought at Path B Max Buy and graded a 9,
+      plus zero-risk breakeven buy cap (= 9-grade Net Payout).
     """
     active_fee = get_active_platform_fee()[1] if fee_rate is None else fee_rate
-    active_grading = get_active_psa_grading_cost()[3]
+    active_grading = get_active_psa_grading_cost()[3] if grading_cost_override is None else grading_cost_override
     ebay_fee_psa9 = psa9_median * active_fee
     psa9_net_payout = (psa9_median * (1.0 - active_fee)) - OUTBOUND_SHIPPING - active_grading
     bailout_profit_loss = psa9_net_payout - path_b_max_buy
@@ -468,6 +487,8 @@ def classify_sale_condition(item: dict) -> str:
         return "PSA 9"
     if grader in ("BGS", "BVG", "BECKETT") and grade_raw == "9.5":
         return "BGS 9.5"
+    if grader in ("BGS", "BVG", "BECKETT") and grade_raw == "9":
+        return "BGS 9"
     if grader == "SGC" and grade_raw == "10":
         return "SGC 10"
     if grader and grade_raw:
@@ -480,6 +501,8 @@ def classify_sale_condition(item: dict) -> str:
         return "PSA 9"
     if re.search(r"\b(?:BGS|BECKETT|BVG)\b[^\d]{0,18}\b9\.5\b", title):
         return "BGS 9.5"
+    if re.search(r"\b(?:BGS|BECKETT|BVG)\b[^\d]{0,18}\b9\b(?!\.5)", title):
+        return "BGS 9"
     if re.search(r"\bSGC\b[^\d]{0,18}\b10\b", title):
         return "SGC 10"
     if re.search(r"\b(?:PSA|BGS|BECKETT|SGC|CGC)\b[^\d]{0,15}\b\d+(?:\.\d+)?\b", title):
@@ -1129,7 +1152,7 @@ def _on_psa_tier_change() -> None:
 
 
 def _step_roi(delta: int) -> None:
-    st.session_state.target_roi_pct = max(5, min(100, st.session_state.target_roi_pct + delta))
+    st.session_state.target_roi_pct = max(1, min(100, st.session_state.target_roi_pct + delta))
 
 
 target_roi_pct = int(st.session_state.target_roi_pct)
@@ -1340,26 +1363,96 @@ def title_passes_filters(title: str, query: str, exclude_inserts: bool, auto_fil
 
 
 def compute_ceilings(sales: dict, cond: str) -> dict:
-    """Max all-in buy ceilings for a listing of a given grade, from the 30-day comps."""
+    """Max all-in buy ceilings for a listing of a given grade, always including both PSA (10/9) and BGS (9.5/9) on Raw."""
     if cond == "Raw":
         raw = compute_comp_stats(sales.get("Raw", []))
         p10 = compute_comp_stats(sales.get("PSA 10", []))
-        a = evaluate_standard_path(raw[anchor_key], raw["floor_25"], target_roi_decimal, include_grading=False)
-        b = evaluate_standard_path(p10[anchor_key], p10["floor_25"], target_roi_decimal, include_grading=True)
         p9 = compute_comp_stats(sales.get("PSA 9", []))
-        cap9 = None
-        if p9["count"] and p10["count"]:
-            cap9 = evaluate_psa9_bailout(p9[anchor_key], b["max_buy"])["breakeven_buy_cap"]
+        b95 = compute_comp_stats(sales.get("BGS 9.5", []))
+        b9 = compute_comp_stats(sales.get("BGS 9", []))
+
+        psa_cost = get_company_grading_cost("PSA")[3]
+        bgs_cost = get_company_grading_cost("BGS")[3]
+
+        a = evaluate_standard_path(raw[anchor_key], raw["floor_25"], target_roi_decimal, include_grading=False)
+        b_psa = evaluate_standard_path(p10[anchor_key], p10["floor_25"], target_roi_decimal, include_grading=True, grading_cost_override=psa_cost)
+        b_bgs = evaluate_standard_path(b95[anchor_key], b95["floor_25"], target_roi_decimal, include_grading=True, grading_cost_override=bgs_cost)
+
+        cap_psa9 = evaluate_psa9_bailout(p9[anchor_key], b_psa["max_buy"], grading_cost_override=psa_cost)["breakeven_buy_cap"] if (p9["count"] and p10["count"]) else None
+        cap_bgs9 = evaluate_psa9_bailout(b9[anchor_key], b_bgs["max_buy"], grading_cost_override=bgs_cost)["breakeven_buy_cap"] if (b9["count"] and b95["count"]) else None
+
         return {
             "A": a["max_buy"] if raw["count"] else None,
-            "B": b["max_buy"] if p10["count"] else None,
-            "cap9": cap9,
+            "B": b_psa["max_buy"] if p10["count"] else None,
+            "cap9": cap_psa9,
+            "B_bgs": b_bgs["max_buy"] if b95["count"] else None,
+            "cap_bgs9": cap_bgs9,
             "n": raw["count"],
             "n_b": p10["count"],
         }
     st_ = compute_comp_stats(sales.get(cond, []))
     c = evaluate_standard_path(st_[anchor_key], st_["floor_25"], target_roi_decimal, include_grading=False)
-    return {"A": c["max_buy"] if st_["count"] else None, "B": None, "cap9": None, "n": st_["count"], "n_b": 0}
+    return {"A": c["max_buy"] if st_["count"] else None, "B": None, "cap9": None, "B_bgs": None, "cap_bgs9": None, "n": st_["count"], "n_b": 0}
+
+
+def score_deal_rows(listings: list[dict], sales: dict, query: str) -> list[dict]:
+    """Score already-fetched listings against 30-day comps using current ROI, anchor, platform fee & grading tiers (0 API tokens)."""
+    ceil_cache: dict[str, dict] = {}
+    rows: list[dict] = []
+    for l in listings:
+        cond = classify_sale_condition({"title": l["Title"]})
+        if cond not in ceil_cache:
+            ceil_cache[cond] = compute_ceilings(sales, cond)
+        c = ceil_cache[cond]
+        total = l["Price ($)"] + (l["Ship ($)"] or 0.0)
+        ceil_a, ceil_b, cap9 = c["A"], c["B"], c.get("cap9")
+        ceil_bgs, cap_bgs9 = c.get("B_bgs"), c.get("cap_bgs9")
+        thin = " ⚠️ thin comps" if (c["n"] < 3 and c["A"] is not None) else ""
+        if ceil_a is None and ceil_b is None and ceil_bgs is None:
+            verdict = "⚠️ No comps"
+            room = None
+        elif cond == "Raw":
+            # Path B is only "safe" if a 9 outcome still breaks even (your bailout rule).
+            safe_psa = min(ceil_b, cap9) if (ceil_b is not None and cap9 is not None) else None
+            safe_bgs = min(ceil_bgs, cap_bgs9) if (ceil_bgs is not None and cap_bgs9 is not None) else None
+            if ceil_a is not None and total <= ceil_a:
+                verdict = "✅ Path A Deal" + thin
+            elif safe_psa is not None and total <= safe_psa:
+                verdict = "🎯 Path B PSA Deal (PSA 9 safe)" + thin
+            elif safe_bgs is not None and total <= safe_bgs:
+                verdict = "🎯 Path B BGS Deal (BGS 9 safe)" + thin
+            elif (ceil_b is not None and total <= ceil_b) or (ceil_bgs is not None and total <= ceil_bgs):
+                verdict = "🎲 Path B — needs PSA 10 / BGS 9.5"
+            else:
+                verdict = "❌ Over ceiling"
+            safe_ceils = [x for x in (ceil_a, safe_psa, safe_bgs) if x is not None]
+            top_ceils = [x for x in (ceil_b, ceil_bgs) if x is not None]
+            best_ceil = max(safe_ceils) if safe_ceils else (max(top_ceils) if top_ceils else None)
+            room = (best_ceil - total) if best_ceil is not None else None
+        else:
+            verdict = ("✅ Slab Deal" + thin) if total <= ceil_a else "❌ Over ceiling"
+            room = ceil_a - total
+        rows.append(
+            {
+                "Photo": l["Photo"],
+                "Verdict": verdict,
+                "Grade": cond,
+                "All-In ($)": round(total, 2),
+                "Price ($)": l["Price ($)"],
+                "Ship ($)": l["Ship ($)"],
+                "Ceiling A/Slab ($)": None if ceil_a is None else round(ceil_a, 2),
+                "Ceiling B ($)": None if ceil_b is None else round(ceil_b, 2),
+                "PSA 9 Safe Cap ($)": None if cap9 is None else round(cap9, 2),
+                "BGS 9.5 Ceiling ($)": None if ceil_bgs is None else round(ceil_bgs, 2),
+                "BGS 9 Safe Cap ($)": None if cap_bgs9 is None else round(cap_bgs9, 2),
+                "Room ($)": None if room is None else round(room, 2),
+                "Type": l["Type"],
+                "Search": query,
+                "Title": l["Title"],
+                "Link": l["Link"],
+            }
+        )
+    return rows
 
 
 def build_deal_rows(
@@ -1376,13 +1469,13 @@ def build_deal_rows(
         query, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), sort, buy_type
     )
     if not el["ok"]:
-        return {"ok": False, "error": el["error"], "rows": [], "sales": {}, "errors": []}
+        return {"ok": False, "error": el["error"], "rows": [], "listings": [], "sales": {}, "errors": []}
 
     filtered_listings = [
         l for l in el["records"] if title_passes_filters(l["Title"], query, exclude_inserts, auto_filter)
     ]
     if not filtered_listings:
-        return {"ok": True, "error": "", "rows": [], "sales": {}, "errors": []}
+        return {"ok": True, "error": "", "rows": [], "listings": [], "sales": {}, "errors": []}
 
     cs_key = get_secret_key("COMPSNIPER_API_KEY")
     tca_key = get_secret_key("THECARDAPI_KEY")
@@ -1392,54 +1485,8 @@ def build_deal_rows(
         if r.get("Include", True):
             sales.setdefault(r["Condition"], []).append(float(r["Sold Price ($)"]))
 
-    ceil_cache: dict[str, dict] = {}
-    rows: list[dict] = []
-    for l in filtered_listings:
-        cond = classify_sale_condition({"title": l["Title"]})
-        if cond not in ceil_cache:
-            ceil_cache[cond] = compute_ceilings(sales, cond)
-        c = ceil_cache[cond]
-        total = l["Price ($)"] + (l["Ship ($)"] or 0.0)
-        ceil_a, ceil_b, cap9 = c["A"], c["B"], c.get("cap9")
-        thin = " ⚠️ thin comps" if (c["n"] < 3 and c["A"] is not None) else ""
-        if ceil_a is None and ceil_b is None:
-            verdict = "⚠️ No comps"
-            room = None
-        elif cond == "Raw":
-            # Path B is only "safe" if a PSA 9 outcome still breaks even (your bailout rule).
-            safe_b = min(ceil_b, cap9) if (ceil_b is not None and cap9 is not None) else None
-            if ceil_a is not None and total <= ceil_a:
-                verdict = "✅ Path A Deal" + thin
-            elif safe_b is not None and total <= safe_b:
-                verdict = "🎯 Path B Deal (PSA 9 safe)" + thin
-            elif ceil_b is not None and total <= ceil_b:
-                verdict = "🎲 Path B — needs PSA 10"
-            else:
-                verdict = "❌ Over ceiling"
-            safe_ceils = [x for x in (ceil_a, safe_b) if x is not None]
-            room = (max(safe_ceils) if safe_ceils else ceil_b) - total
-        else:
-            verdict = ("✅ Slab Deal" + thin) if total <= ceil_a else "❌ Over ceiling"
-            room = ceil_a - total
-        rows.append(
-            {
-                "Photo": l["Photo"],
-                "Verdict": verdict,
-                "Grade": cond,
-                "All-In ($)": round(total, 2),
-                "Price ($)": l["Price ($)"],
-                "Ship ($)": l["Ship ($)"],
-                "Ceiling A/Slab ($)": None if ceil_a is None else round(ceil_a, 2),
-                "Ceiling B ($)": None if ceil_b is None else round(ceil_b, 2),
-                "PSA 9 Safe Cap ($)": None if cap9 is None else round(cap9, 2),
-                "Room ($)": None if room is None else round(room, 2),
-                "Type": l["Type"],
-                "Search": query,
-                "Title": l["Title"],
-                "Link": l["Link"],
-            }
-        )
-    return {"ok": True, "error": "", "rows": rows, "sales": sales, "errors": errors}
+    rows = score_deal_rows(filtered_listings, sales, query)
+    return {"ok": True, "error": "", "rows": rows, "listings": filtered_listings, "sales": sales, "errors": errors}
 
 
 DEAL_TABLE_CONFIG = {
@@ -1448,8 +1495,10 @@ DEAL_TABLE_CONFIG = {
     "Price ($)": st.column_config.NumberColumn("Price", format="$%.2f"),
     "Ship ($)": st.column_config.NumberColumn("Shipping", format="$%.2f"),
     "Ceiling A/Slab ($)": st.column_config.NumberColumn("Max Buy (Path A / Slab)", format="$%.2f"),
-    "Ceiling B ($)": st.column_config.NumberColumn("Max Buy (Path B, needs PSA 10)", format="$%.2f"),
+    "Ceiling B ($)": st.column_config.NumberColumn("Max Buy (PSA 10)", format="$%.2f"),
     "PSA 9 Safe Cap ($)": st.column_config.NumberColumn("PSA 9 Safe Cap", format="$%.2f"),
+    "BGS 9.5 Ceiling ($)": st.column_config.NumberColumn("Max Buy (BGS 9.5)", format="$%.2f"),
+    "BGS 9 Safe Cap ($)": st.column_config.NumberColumn("BGS 9 Safe Cap", format="$%.2f"),
     "Room ($)": st.column_config.NumberColumn("Room Under Ceiling", format="$%.2f"),
     "Link": st.column_config.LinkColumn("eBay Listing", display_text="View ↗"),
     "Title": st.column_config.TextColumn("Title", width="large"),
@@ -2017,7 +2066,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
     # TIER 1 — Default Clean Snapshot (Always Visible)
     # ---------------------------------------------------------------------------
     st.markdown(
-        brand_heading(ICON_TIER1, "Tier 1 — Valuation & Buy Ceiling Snapshot", size_rem=1.22, icon_px=28),
+        brand_heading(ICON_TIER1, "Heist Snapshot", size_rem=1.22, icon_px=28),
         unsafe_allow_html=True,
     )
 
@@ -2025,6 +2074,11 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
         raw_stats = compute_comp_stats(card_sales_data.get("Raw", []))
         psa10_stats = compute_comp_stats(card_sales_data.get("PSA 10", []))
         psa9_stats = compute_comp_stats(card_sales_data.get("PSA 9", []))
+        bgs95_stats = compute_comp_stats(card_sales_data.get("BGS 9.5", []))
+        bgs9_stats = compute_comp_stats(card_sales_data.get("BGS 9", []))
+
+        psa_s, psa_b_fee, psa_s_fee, psa_all_in = get_company_grading_cost("PSA")
+        bgs_s, bgs_b_fee, bgs_s_fee, bgs_all_in = get_company_grading_cost("BGS")
 
         # Header Metadata Banner
         st.markdown(
@@ -2032,7 +2086,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
             <div class="comp-metadata-bar">
                 <b>TARGET CARD:</b> {selected_card_title}<br>
                 <b>DETECTED CONDITION:</b> <span style="color:#f43f5e;font-weight:700;">RAW (UN-GRADED)</span> &nbsp;&bull;&nbsp;
-                <b>30-DAY LIQUIDITY:</b> <span style="color:#c084fc;font-weight:700;">{raw_stats['count']} raw sales | {psa10_stats['count']} PSA 10 sales | {psa9_stats['count']} PSA 9 sales</span> &nbsp;&bull;&nbsp;
+                <b>30-DAY LIQUIDITY:</b> <span style="color:#c084fc;font-weight:700;">{raw_stats['count']} raw | {psa10_stats['count']} PSA 10 | {psa9_stats['count']} PSA 9 | {bgs95_stats['count']} BGS 9.5 | {bgs9_stats['count']} BGS 9</span> &nbsp;&bull;&nbsp;
                 <b>TARGET ROI:</b> <span style="color:#4ade80;font-weight:700;">{target_roi_pct}%</span>
             </div>
             """,
@@ -2050,10 +2104,24 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
             floor_price=psa10_stats["floor_25"],
             target_roi_decimal=target_roi_decimal,
             include_grading=True,
+            grading_cost_override=psa_all_in,
         )
         bailout_9 = evaluate_psa9_bailout(
             psa9_median=psa9_stats[anchor_key],
             path_b_max_buy=path_b["max_buy"],
+            grading_cost_override=psa_all_in,
+        )
+        path_b_bgs = evaluate_standard_path(
+            median_price=bgs95_stats[anchor_key],
+            floor_price=bgs95_stats["floor_25"],
+            target_roi_decimal=target_roi_decimal,
+            include_grading=True,
+            grading_cost_override=bgs_all_in,
+        )
+        bailout_bgs9 = evaluate_psa9_bailout(
+            psa9_median=bgs9_stats[anchor_key],
+            path_b_max_buy=path_b_bgs["max_buy"],
+            grading_cost_override=bgs_all_in,
         )
 
         col_path_a, col_path_b = st.columns(2)
@@ -2117,41 +2185,27 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
         with col_path_b:
             with st.container(border=True):
                 st.markdown(
-                    brand_heading(ICON_PATH_B, "PATH B — RAW-TO-PSA 10 GRADE"),
+                    brand_heading(ICON_PATH_B, "PATH B — RAW-TO-GRADE (PSA 10 / BGS 9.5)"),
                     unsafe_allow_html=True,
                 )
-                st.caption(f"Buy Raw -> Grade with PSA ({psa_tier_short} ${psa_total_cost:.2f} all-in) -> Sell PSA 10")
+                st.caption(f"PSA ({psa_s} ${psa_all_in:.2f} all-in) & BGS ({bgs_s} ${bgs_all_in:.2f} all-in) shown side-by-side")
 
                 b1, b2 = st.columns(2)
                 b1.metric(f"30-Day PSA 10 {anchor_label}", f"${path_b['median']:,.2f}")
-                b2.metric("25th-Pct Conservative Floor", f"${path_b['floor_25']:,.2f}")
+                b2.metric(f"Max All-In Buy PSA 10 ({target_roi_pct}% ROI)", f"${path_b['max_buy']:,.2f}", delta=f"+${path_b['expected_profit']:,.2f} Est. Profit")
 
-                b3, b4 = st.columns(2)
-                b3.metric("Net Payout (After Fees/Ship/PSA)", f"${path_b['net_payout']:,.2f}")
-                b4.metric(
-                    f"Max All-In Buy ({target_roi_pct}% ROI)",
-                    f"${path_b['max_buy']:,.2f}",
-                    delta=f"+${path_b['expected_profit']:,.2f} Est. Net Profit",
-                )
+                bg1, bg2 = st.columns(2)
+                bg1.metric(f"30-Day BGS 9.5 {anchor_label}", f"${path_b_bgs['median']:,.2f}")
+                bg2.metric(f"Max All-In Buy BGS 9.5 ({target_roi_pct}% ROI)", f"${path_b_bgs['max_buy']:,.2f}", delta=f"+${path_b_bgs['expected_profit']:,.2f} Est. Profit")
 
                 st.divider()
                 st.markdown(
-                    brand_heading(ICON_BAILOUT_9, "PSA 9 BAILOUT CHECK", size_rem=1.08, icon_px=30),
+                    brand_heading(ICON_BAILOUT_9, "PSA 9 / BGS 9 BAILOUT FLOOR", size_rem=1.08, icon_px=30),
                     unsafe_allow_html=True,
                 )
-                bail_col1, bail_col2, bail_col3 = st.columns(3)
-                bail_col1.metric(f"30-Day PSA 9 {anchor_label}", f"${bailout_9['psa9_median']:,.2f}")
-                bail_col2.metric(
-                    "PSA 9 Net Profit / Loss",
-                    f"${bailout_9['bailout_profit_loss']:+,.2f}",
-                    delta="If bought at Path B Max Buy",
-                    delta_color="normal" if bailout_9["bailout_profit_loss"] >= 0 else "inverse",
-                )
-                bail_col3.metric(
-                    "Zero-Risk Breakeven Buy Cap",
-                    f"${bailout_9['breakeven_buy_cap']:,.2f}",
-                    help="Max price you can pay for the Raw card so that even a PSA 9 grade breaks 100% even after all PSA & eBay fees.",
-                )
+                bail_col1, bail_col2 = st.columns(2)
+                bail_col1.metric(f"PSA 9 {anchor_label} | Safe Cap", f"${bailout_9['psa9_median']:,.2f} | ${bailout_9['breakeven_buy_cap']:,.2f}")
+                bail_col2.metric(f"BGS 9 {anchor_label} | Safe Cap", f"${bailout_bgs9['psa9_median']:,.2f} | ${bailout_bgs9['breakeven_buy_cap']:,.2f}")
 
                 # TIER 2 — Clickable Arithmetic Breakdown (Path B)
                 with st.expander("➕ Click to Open Tier 2 — Arithmetic Breakdown & Floor Stress Test (Path B)"):
@@ -2611,7 +2665,7 @@ elif data_mode == "eBay Live Listings (Buy Side)":
         )
     with bq2:
         buy_grade = st.selectbox(
-            "Valuation Grade (drives Tier 1)",
+            "Grade Filter",
             options=["Raw", "PSA 10", "PSA 9", "BGS 9.5", "SGC 10"],
             index=0,
             key="buy_grade",
@@ -2650,7 +2704,7 @@ elif data_mode == "eBay Live Listings (Buy Side)":
         )
 
     if not buy_query.strip():
-        st.info("🔎 Enter a card above and press **Enter** (or click **⚡ Bijan Silver #305**) to load Tier 1 buy ceilings & live eBay listings. Blank by default so opening the app uses zero API tokens.")
+        st.info("🔎 Enter a card above and press **Enter** (or click **⚡ Bijan Silver #305**) to load live eBay listings. Blank by default so opening the app uses zero API tokens.")
     else:
         render_marketplace_links(buy_query)
         with st.spinner("Pulling 30-day comps + live eBay listings..."):
@@ -2658,8 +2712,6 @@ elif data_mode == "eBay Live Listings (Buy Side)":
 
         for e_ in deal_res["errors"]:
             st.caption(f"⚠️ {e_}")
-
-        render_tier1(deal_res["sales"], buy_grade, buy_query)
 
         st.markdown(
             brand_heading(ICON_PATH_B, "Live eBay Listings", size_rem=1.22, icon_px=30),
@@ -2690,112 +2742,10 @@ elif data_mode == "Deal Finder":
         unsafe_allow_html=True,
     )
     st.caption(
-        "Set your Target ROI % and watchlist (one search per line, max 8). The Cipher pulls 30-day comps and live eBay listings for each, "
-        "then surfaces listings priced at or under your Path A / Path B / Slab ceiling."
+        "Enter your watchlist (one search per line, max 8) and click Search to pull live eBay listings (0 CompSniper tokens). "
+        "Then configure Heist Controls below and click Perform Heist to pull 30-day comps and filter to deals."
     )
 
-    with st.container(border=True):
-        mc1, mc2, mc3, mc4 = st.columns([2.0, 0.7, 0.7, 1.8])
-        with mc1:
-            st.slider(
-                "Margin Control — Target ROI %",
-                min_value=5,
-                max_value=100,
-                step=1,
-                key="target_roi_pct",
-                help="Default: 10%. Drag or use -1% / +1% for exact 1% steps.",
-            )
-        with mc2:
-            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-            st.button("➖ 1%", on_click=_step_roi, args=(-1,), use_container_width=True)
-        with mc3:
-            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-            st.button("➕ 1%", on_click=_step_roi, args=(1,), use_container_width=True)
-        with mc4:
-            st.radio(
-                "Primary Valuation Anchor",
-                options=["30-Day Median (Spec Default)", "30-Day Average (Mean)"],
-                key="anchor_mode",
-            )
-        target_roi_pct = int(st.session_state.target_roi_pct)
-        target_roi_decimal = target_roi_pct / 100.0
-        anchor_key = "mean" if "Average" in st.session_state.anchor_mode else "median"
-        anchor_label = "Average" if anchor_key == "mean" else "Median"
-        fp1, fp2 = st.columns([3.5, 1.2])
-        with fp1:
-            st.radio(
-                "Selling Platform (Auto-Sets Fee %)",
-                options=list(PLATFORM_FEE_RATES.keys()),
-                horizontal=True,
-                key="sell_platform",
-            )
-        with fp2:
-            if st.session_state.sell_platform == "Custom":
-                st.number_input(
-                    "Custom Fee %",
-                    min_value=0.0,
-                    max_value=50.0,
-                    step=0.25,
-                    format="%.2f",
-                    key="custom_fee_pct",
-                )
-        active_platform_name, active_fee_rate = get_active_platform_fee()
-        pt0, pt1, pt2, pt3 = st.columns([0.9, 2.3, 1.0, 1.0])
-        with pt0:
-            st.radio(
-                "Grader",
-                options=["PSA", "BGS"],
-                horizontal=True,
-                key="grading_company",
-                on_change=_on_grading_company_change,
-            )
-        active_tiers = DEFAULT_GRADING_TIERS.get(st.session_state.grading_company, DEFAULT_GRADING_TIERS["PSA"])
-        with pt1:
-            st.selectbox(
-                f"{st.session_state.grading_company} Grading Tier (Path B)",
-                options=list(active_tiers.keys()),
-                key="psa_tier",
-                on_change=_on_psa_tier_change,
-            )
-        with pt2:
-            st.number_input(
-                "Ins. & Ship ($)",
-                min_value=0.0,
-                max_value=250.0,
-                step=0.50,
-                format="%.2f",
-                key="psa_ship_ins",
-                help="Amortized inbound/return shipping, insurance & prep per card. Auto-updates with tier, or adjust manually.",
-            )
-        with pt3:
-            if st.session_state.psa_tier == "Custom":
-                st.number_input(
-                    f"Custom {st.session_state.grading_company} ($)",
-                    min_value=0.0,
-                    max_value=2000.0,
-                    step=1.00,
-                    format="%.2f",
-                    key="psa_custom_base",
-                )
-        gd = get_active_grading_details()
-        psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = gd["short"], gd["base"], gd["ship_ins"], gd["total"]
-        status_badge = f" • Status: <strong style='color:#4ade80;'>{gd['status']}</strong>" if gd["status"] == "Open" else f" • Status: <strong style='color:#fbbf24;'>{gd['status']}</strong>"
-        st.markdown(
-            f"""
-            <div style="font-size:0.86rem; color:#e2e8f0; background:rgba(147,51,234,0.10); border:1px solid rgba(168,85,247,0.35); border-radius:8px; padding:7px 12px; margin-top:4px;">
-                <span style="color:#c084fc; font-weight:700; letter-spacing:0.04em;">FIXED HEIST OVERHEAD:</span>
-                {active_platform_name} Fee: <strong style="color:#f8fafc;">{active_fee_rate * 100:.2f}%</strong> &nbsp;•&nbsp;
-                Outbound Shipping &amp; Supplies: <strong style="color:#f8fafc;">${OUTBOUND_SHIPPING:.2f}</strong> &nbsp;•&nbsp;
-                {gd['company']} All-In Grading ({psa_tier_short}): <strong style="color:#f8fafc;">${psa_total_cost:.2f}</strong>
-                <span style="color:#cbd5e1;">(${psa_base_fee:.2f} tier + ${psa_ship_ins:.2f} ins/ship • Est. {gd['turnaround']})</span>{status_badge}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            "Verify current pricing & open tiers before submitting: "
-            "[PSA Pricing](https://www.psacard.com/pricing) • [Beckett Grading](https://www.beckett.com/grading)"
-        )
     watchlist_text = st.text_area(
         "Watchlist (one search per line)",
         value="2023 Prizm Bijan Robinson Silver 305",
@@ -2809,7 +2759,7 @@ elif data_mode == "Deal Finder":
         df_grades = st.selectbox("Grades", ["All", "Raw only", "Slabs only"], key="df_grades")
     with dfc3:
         df_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"], key="df_type")
-    dc1, dc2, dc3 = st.columns(3)
+    dc1, dc2 = st.columns(2)
     with dc1:
         df_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="df_excl")
     with dc2:
@@ -2819,36 +2769,234 @@ elif data_mode == "Deal Finder":
             key="df_auctions",
             help="ON by default in Deal Finder so it searches everything (eBay + Graded Auction Houses).",
         )
-    with dc3:
-        df_deals_only = st.checkbox("Deals only (hide listings over ceiling)", value=True, key="df_deals_only")
 
-    if st.button("Perform Heist", type="primary"):
+    if st.button("Search", type="primary"):
         queries = [q.strip() for q in watchlist_text.splitlines() if q.strip()][:8]
-        all_rows: list[dict] = []
-        all_sales: dict[str, dict] = {}
+        all_listings: dict[str, list[dict]] = {}
         scan_errors: list[str] = []
-        prog = st.progress(0.0, text="Scanning...")
+        prog = st.progress(0.0, text="Searching eBay...")
         for i_, q_ in enumerate(queries):
-            prog.progress(i_ / max(len(queries), 1), text=f"Scanning: {q_}")
-            res_ = build_deal_rows(q_, df_excl, df_auto, True, df_auctions, "Price + Shipping: Lowest First", df_type)
-            all_sales[q_] = res_.get("sales", {})
-            if res_["ok"]:
-                all_rows.extend(res_["rows"])
+            prog.progress(i_ / max(len(queries), 1), text=f"Searching eBay: {q_}")
+            el = fetch_ebay_active_listings(
+                q_, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), "Price + Shipping: Lowest First", df_type
+            )
+            if el["ok"]:
+                filtered_ = [
+                    l for l in el["records"] if title_passes_filters(l["Title"], q_, df_excl, df_auto)
+                ]
+                all_listings[q_] = filtered_
             else:
-                scan_errors.append(f"{q_}: {res_['error']}")
+                all_listings[q_] = []
+                scan_errors.append(f"{q_}: {el['error']}")
         prog.empty()
-        st.session_state["deal_finder_rows"] = all_rows
-        st.session_state["deal_finder_sales"] = all_sales
+        st.session_state["deal_finder_listings"] = all_listings
+        st.session_state["deal_finder_sales"] = {}
         st.session_state["deal_finder_errors"] = scan_errors
+        st.session_state["heist_active"] = False
 
-    if "deal_finder_rows" in st.session_state:
+    if "deal_finder_listings" in st.session_state:
         for e_ in st.session_state.get("deal_finder_errors", []):
             st.error(e_)
+
+        listings_map = st.session_state.get("deal_finder_listings", {})
         sales_map = st.session_state.get("deal_finder_sales", {})
-        if sales_map:
+        heist_active = bool(st.session_state.get("heist_active", False))
+
+        st.markdown(
+            brand_heading(ICON_PATH_B, "Heist Results" if heist_active else "eBay Search Results", size_rem=1.22, icon_px=30),
+            unsafe_allow_html=True,
+        )
+
+        if not heist_active:
+            raw_rows: list[dict] = []
+            for q_, l_list in listings_map.items():
+                for l in l_list:
+                    cond = classify_sale_condition({"title": l["Title"]})
+                    total = l["Price ($)"] + (l["Ship ($)"] or 0.0)
+                    raw_rows.append(
+                        {
+                            "Photo": l["Photo"],
+                            "Grade": cond,
+                            "All-In ($)": round(total, 2),
+                            "Price ($)": l["Price ($)"],
+                            "Ship ($)": l["Ship ($)"],
+                            "Type": l["Type"],
+                            "Search": q_,
+                            "Title": l["Title"],
+                            "Link": l["Link"],
+                        }
+                    )
+            if raw_rows:
+                df_raw = pd.DataFrame(raw_rows)
+                if df_grades == "Raw only":
+                    df_raw = df_raw[df_raw["Grade"] == "Raw"]
+                elif df_grades == "Slabs only":
+                    df_raw = df_raw[df_raw["Grade"] != "Raw"]
+                df_raw = df_raw.sort_values("All-In ($)", ascending=True, na_position="last")
+                st.caption(f"{len(df_raw)} active eBay listings found. Set Heist Controls below and click Perform Heist to filter to deals.")
+                if df_raw.empty:
+                    st.info("No listings matched your Grade filter.")
+                else:
+                    st.dataframe(df_raw, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
+            else:
+                st.info("No active eBay listings found for that watchlist.")
+        else:
+            scored_rows: list[dict] = []
+            for q_, l_list in listings_map.items():
+                scored_rows.extend(score_deal_rows(l_list, sales_map.get(q_, {}), q_))
+            if scored_rows:
+                dfinder = pd.DataFrame(scored_rows)
+                if df_grades == "Raw only":
+                    dfinder = dfinder[dfinder["Grade"] == "Raw"]
+                elif df_grades == "Slabs only":
+                    dfinder = dfinder[dfinder["Grade"] != "Raw"]
+                total_before_heist = len(dfinder)
+                deal_count = int(dfinder["Verdict"].str.startswith(("✅", "🎯")).sum()) if total_before_heist else 0
+                hide_over = st.checkbox("Hide over-ceiling listings", value=True, key="df_hide_over")
+                if hide_over:
+                    dfinder = dfinder[dfinder["Verdict"].str.startswith(("✅", "🎯"))]
+                dfinder = dfinder.sort_values("Room ($)", ascending=False, na_position="last")
+                st.caption(f"{deal_count} of {total_before_heist} listings fit your Heist Criteria ({len(dfinder)} shown)")
+                if dfinder.empty:
+                    st.info("No listings fit your current Heist Criteria. Uncheck 'Hide over-ceiling listings' to see how close each card is, or adjust Heist Controls below.")
+                else:
+                    st.dataframe(dfinder, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
+            else:
+                st.info("No active eBay listings found for that watchlist.")
+
+        st.markdown(
+            brand_heading(ICON_PATH_C, "Heist Controls", size_rem=1.18, icon_px=28),
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            mc1, mc2, mc3, mc4 = st.columns([2.0, 0.7, 0.7, 1.8])
+            with mc1:
+                st.slider(
+                    "Margin Control — Target ROI %",
+                    min_value=1,
+                    max_value=100,
+                    step=1,
+                    key="target_roi_pct",
+                    help="Default: 10%. Drag or use -1% / +1% for exact 1% steps.",
+                )
+            with mc2:
+                st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+                st.button("➖ 1%", on_click=_step_roi, args=(-1,), use_container_width=True)
+            with mc3:
+                st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+                st.button("➕ 1%", on_click=_step_roi, args=(1,), use_container_width=True)
+            with mc4:
+                st.radio(
+                    "Primary Valuation Anchor",
+                    options=["30-Day Median (Spec Default)", "30-Day Average (Mean)"],
+                    key="anchor_mode",
+                )
+            target_roi_pct = int(st.session_state.target_roi_pct)
+            target_roi_decimal = target_roi_pct / 100.0
+            anchor_key = "mean" if "Average" in st.session_state.anchor_mode else "median"
+            anchor_label = "Average" if anchor_key == "mean" else "Median"
+            fp1, fp2 = st.columns([3.5, 1.2])
+            with fp1:
+                st.radio(
+                    "Selling Platform (Auto-Sets Fee %)",
+                    options=list(PLATFORM_FEE_RATES.keys()),
+                    horizontal=True,
+                    key="sell_platform",
+                )
+            with fp2:
+                if st.session_state.sell_platform == "Custom":
+                    st.number_input(
+                        "Custom Fee %",
+                        min_value=0.0,
+                        max_value=50.0,
+                        step=0.25,
+                        format="%.2f",
+                        key="custom_fee_pct",
+                    )
+            active_platform_name, active_fee_rate = get_active_platform_fee()
+            pt0, pt1, pt2, pt3 = st.columns([0.9, 2.3, 1.0, 1.0])
+            with pt0:
+                st.radio(
+                    "Grader",
+                    options=["PSA", "BGS"],
+                    horizontal=True,
+                    key="grading_company",
+                    on_change=_on_grading_company_change,
+                )
+            active_tiers = DEFAULT_GRADING_TIERS.get(st.session_state.grading_company, DEFAULT_GRADING_TIERS["PSA"])
+            with pt1:
+                st.selectbox(
+                    f"{st.session_state.grading_company} Grading Tier (Path B)",
+                    options=list(active_tiers.keys()),
+                    key="psa_tier",
+                    on_change=_on_psa_tier_change,
+                )
+            with pt2:
+                st.number_input(
+                    "Ins. & Ship ($)",
+                    min_value=0.0,
+                    max_value=250.0,
+                    step=0.50,
+                    format="%.2f",
+                    key="psa_ship_ins",
+                    help="Amortized inbound/return shipping, insurance & prep per card. Auto-updates with tier, or adjust manually.",
+                )
+            with pt3:
+                if st.session_state.psa_tier == "Custom":
+                    st.number_input(
+                        f"Custom {st.session_state.grading_company} ($)",
+                        min_value=0.0,
+                        max_value=2000.0,
+                        step=1.00,
+                        format="%.2f",
+                        key="psa_custom_base",
+                    )
+            gd = get_active_grading_details()
+            psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = gd["short"], gd["base"], gd["ship_ins"], gd["total"]
+            status_badge = f" • Status: <strong style='color:#4ade80;'>{gd['status']}</strong>" if gd["status"] == "Open" else f" • Status: <strong style='color:#fbbf24;'>{gd['status']}</strong>"
+            st.markdown(
+                f"""
+                <div style="font-size:0.86rem; color:#e2e8f0; background:rgba(147,51,234,0.10); border:1px solid rgba(168,85,247,0.35); border-radius:8px; padding:7px 12px; margin-top:4px;">
+                    <span style="color:#c084fc; font-weight:700; letter-spacing:0.04em;">FIXED HEIST OVERHEAD:</span>
+                    {active_platform_name} Fee: <strong style="color:#f8fafc;">{active_fee_rate * 100:.2f}%</strong> &nbsp;•&nbsp;
+                    Outbound Shipping &amp; Supplies: <strong style="color:#f8fafc;">${OUTBOUND_SHIPPING:.2f}</strong> &nbsp;•&nbsp;
+                    {gd['company']} All-In Grading ({psa_tier_short}): <strong style="color:#f8fafc;">${psa_total_cost:.2f}</strong>
+                    <span style="color:#cbd5e1;">(${psa_base_fee:.2f} tier + ${psa_ship_ins:.2f} ins/ship • Est. {gd['turnaround']})</span>{status_badge}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Verify current pricing & open tiers before submitting: "
+                "[PSA Pricing](https://www.psacard.com/pricing) • [Beckett Grading](https://www.beckett.com/grading)"
+            )
+            if st.button("Perform Heist", type="primary"):
+                cs_key = get_secret_key("COMPSNIPER_API_KEY")
+                tca_key = get_secret_key("THECARDAPI_KEY")
+                new_sales = dict(sales_map)
+                heist_errors = list(st.session_state.get("deal_finder_errors", []))
+                to_fetch = [q_ for q_, l_list in listings_map.items() if l_list and q_ not in new_sales]
+                if to_fetch:
+                    prog_h = st.progress(0.0, text="Pulling 30-day comps...")
+                    for i_, q_ in enumerate(to_fetch):
+                        prog_h.progress(i_ / max(len(to_fetch), 1), text=f"Pulling comps: {q_}")
+                        recs, errs = gather_merged_comps(q_, cs_key, tca_key, df_excl, df_auto, True, df_auctions)
+                        q_sales: dict[str, list[float]] = {}
+                        for r in recs:
+                            if r.get("Include", True):
+                                q_sales.setdefault(r["Condition"], []).append(float(r["Sold Price ($)"]))
+                        new_sales[q_] = q_sales
+                        heist_errors.extend(errs)
+                    prog_h.empty()
+                st.session_state["deal_finder_sales"] = new_sales
+                st.session_state["deal_finder_errors"] = heist_errors
+                st.session_state["heist_active"] = True
+                st.rerun()
+
+        if heist_active and sales_map:
             t1_col1, t1_col2 = st.columns([2.2, 1])
             with t1_col1:
-                t1_card = st.selectbox("Tier 1 Buy Ceiling Card", options=list(sales_map.keys()), key="df_t1_card")
+                t1_card = st.selectbox("Heist Snapshot Card", options=list(sales_map.keys()), key="df_t1_card")
             with t1_col2:
                 t1_grade = st.selectbox(
                     "Valuation Grade",
@@ -2858,24 +3006,3 @@ elif data_mode == "Deal Finder":
                 )
             render_tier1(sales_map[t1_card], t1_grade, t1_card)
             render_marketplace_links(t1_card)
-            st.markdown(
-                brand_heading(ICON_PATH_B, "Deal Finder Results", size_rem=1.22, icon_px=30),
-                unsafe_allow_html=True,
-            )
-        rows_ = st.session_state["deal_finder_rows"]
-        if rows_:
-            dfinder = pd.DataFrame(rows_)
-            if df_grades == "Raw only":
-                dfinder = dfinder[dfinder["Grade"] == "Raw"]
-            elif df_grades == "Slabs only":
-                dfinder = dfinder[dfinder["Grade"] != "Raw"]
-            if df_deals_only:
-                dfinder = dfinder[dfinder["Verdict"].str.startswith(("✅", "🎯"))]
-            dfinder = dfinder.sort_values("Room ($)", ascending=False, na_position="last")
-            st.caption(f"{len(dfinder)} listings shown")
-            if dfinder.empty:
-                st.info("No listings at or under your ceiling right now. Try again later or widen the filters.")
-            else:
-                st.dataframe(dfinder, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
-        else:
-            st.info("No active listings found for that watchlist.")
