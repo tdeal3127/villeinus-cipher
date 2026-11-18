@@ -152,9 +152,53 @@ st.markdown(
 )
 
 # Fixed Friction Constants from PROJECT_SPEC.md
-EBAY_FEE_RATE = 0.1325          # 13.25% eBay Final Value Fee
+EBAY_FEE_RATE = 0.1325          # 13.25% eBay Final Value Fee (default)
 OUTBOUND_SHIPPING = 4.50        # $4.50 Ground Advantage bubble mailer + supplies
 PSA_GRADING_COST = 47.00        # $39.99 Value tier + ~$7.01 amortized shipping/prep
+
+PLATFORM_FEE_RATES = {
+    "eBay": 0.1325,
+    "TikTok Shop": 0.0800,
+    "Whatnot": 0.1090,
+    "MySlabs": 0.0490,
+    "In-Person / Cash": 0.0000,
+    "Custom": None,
+}
+
+
+def get_active_platform_fee() -> tuple[str, float]:
+    """Return (platform_name, fee_rate_decimal) from session state, defaulting to eBay 13.25%."""
+    platform = st.session_state.get("sell_platform", "eBay")
+    preset = PLATFORM_FEE_RATES.get(platform)
+    if preset is None:
+        custom_pct = float(st.session_state.get("custom_fee_pct", 13.25))
+        return "Custom", max(0.0, min(50.0, custom_pct)) / 100.0
+    return platform, preset
+
+
+PSA_TIERS = {
+    "Value ($39.99 | Max $500)": {"short": "Value", "base": 39.99, "ship_ins": 7.01},
+    "Standard ($59.99 | Max $1,000)": {"short": "Standard", "base": 59.99, "ship_ins": 10.01},
+    "Priority ($79.99 | Max $1,500)": {"short": "Priority", "base": 79.99, "ship_ins": 12.01},
+    "Express ($199.00 | Max $2,500)": {"short": "Express", "base": 199.00, "ship_ins": 20.00},
+    "Super Express ($349.00 | Max $5,000)": {"short": "Super Express", "base": 349.00, "ship_ins": 30.00},
+    "Premier ($599.00 | Max $10,000)": {"short": "Premier", "base": 599.00, "ship_ins": 40.00},
+    "Custom": {"short": "Custom", "base": 39.99, "ship_ins": 7.01},
+}
+
+
+def get_active_psa_grading_cost() -> tuple[str, float, float, float]:
+    """Return (short_tier_name, base_fee, ship_ins, total_all_in_cost) from session state."""
+    tier_key = st.session_state.get("psa_tier", "Value ($39.99 | Max $500)")
+    info = PSA_TIERS.get(tier_key, PSA_TIERS["Value ($39.99 | Max $500)"])
+    if tier_key == "Custom":
+        base_fee = float(st.session_state.get("psa_custom_base", 39.99))
+    else:
+        base_fee = float(info["base"])
+    ship_ins = float(st.session_state.get("psa_ship_ins", info["ship_ins"]))
+    base_fee = max(0.0, base_fee)
+    ship_ins = max(0.0, ship_ins)
+    return info["short"], base_fee, ship_ins, round(base_fee + ship_ins, 2)
 
 LOGO_PATH = (
     Path(__file__).parent / "logo.png"
@@ -220,24 +264,26 @@ def evaluate_standard_path(
     floor_price: float,
     target_roi_decimal: float,
     include_grading: bool = False,
+    fee_rate: float | None = None,
 ) -> dict:
     """
     Evaluate Path A (Raw-to-Raw), Path B (Raw-to-PSA 10), or Path C (Slab-to-Slab).
     Formula from Spec:
-      Net Payout = (30-Day Median * (1 - 0.1325)) - 4.50 [- 47.00 if Path B]
+      Net Payout = (30-Day Median * (1 - fee_rate)) - 4.50 [- 47.00 if Path B]
       Max All-In Buy Price = Net Payout / (1 + Target ROI)
     """
-    grading_cost = PSA_GRADING_COST if include_grading else 0.0
+    grading_cost = get_active_psa_grading_cost()[3] if include_grading else 0.0
+    active_fee = get_active_platform_fee()[1] if fee_rate is None else fee_rate
 
     # Primary Median Valuation Math
-    ebay_fee_median = median_price * EBAY_FEE_RATE
-    net_payout_median = (median_price * (1.0 - EBAY_FEE_RATE)) - OUTBOUND_SHIPPING - grading_cost
+    ebay_fee_median = median_price * active_fee
+    net_payout_median = (median_price * (1.0 - active_fee)) - OUTBOUND_SHIPPING - grading_cost
     max_buy_price = net_payout_median / (1.0 + target_roi_decimal)
     expected_profit_at_max_buy = net_payout_median - max_buy_price
 
     # Downside Stress Test (25th-Percentile Floor) Math
-    ebay_fee_floor = floor_price * EBAY_FEE_RATE
-    net_payout_floor = (floor_price * (1.0 - EBAY_FEE_RATE)) - OUTBOUND_SHIPPING - grading_cost
+    ebay_fee_floor = floor_price * active_fee
+    net_payout_floor = (floor_price * (1.0 - active_fee)) - OUTBOUND_SHIPPING - grading_cost
     floor_stress_profit_loss = net_payout_floor - max_buy_price
 
     return {
@@ -255,21 +301,28 @@ def evaluate_standard_path(
     }
 
 
-def evaluate_psa9_bailout(psa9_median: float, path_b_max_buy: float) -> dict:
+def evaluate_psa9_bailout(
+    psa9_median: float,
+    path_b_max_buy: float,
+    fee_rate: float | None = None,
+) -> dict:
     """
     PSA 9 Bailout Check (Path B only):
-      Deduct 13.25% fees, $4.50 mailer, and $47.00 PSA cost from 30-day PSA 9 Median.
+      Deduct platform fees, $4.50 mailer, and $47.00 PSA cost from 30-day PSA 9 Median.
       Display exact Net Profit/Loss if bought at Path B Max Buy and graded a PSA 9,
       plus zero-risk breakeven buy cap (= PSA 9 Net Payout).
     """
-    ebay_fee_psa9 = psa9_median * EBAY_FEE_RATE
-    psa9_net_payout = (psa9_median * (1.0 - EBAY_FEE_RATE)) - OUTBOUND_SHIPPING - PSA_GRADING_COST
+    active_fee = get_active_platform_fee()[1] if fee_rate is None else fee_rate
+    active_grading = get_active_psa_grading_cost()[3]
+    ebay_fee_psa9 = psa9_median * active_fee
+    psa9_net_payout = (psa9_median * (1.0 - active_fee)) - OUTBOUND_SHIPPING - active_grading
     bailout_profit_loss = psa9_net_payout - path_b_max_buy
     breakeven_buy_cap = psa9_net_payout
 
     return {
         "psa9_median": psa9_median,
         "ebay_fee_psa9": ebay_fee_psa9,
+        "grading_cost": active_grading,
         "psa9_net_payout": psa9_net_payout,
         "bailout_profit_loss": bailout_profit_loss,
         "breakeven_buy_cap": breakeven_buy_cap,
@@ -973,6 +1026,23 @@ if "nav_section" not in st.session_state:
     st.session_state.nav_section = "Sales Data"
 if "sales_submode" not in st.session_state:
     st.session_state.sales_submode = "Live Sold Comps"
+if "sell_platform" not in st.session_state:
+    st.session_state.sell_platform = "eBay"
+if "custom_fee_pct" not in st.session_state:
+    st.session_state.custom_fee_pct = 13.25
+if "psa_tier" not in st.session_state:
+    st.session_state.psa_tier = "Value ($39.99 | Max $500)"
+if "psa_ship_ins" not in st.session_state:
+    st.session_state.psa_ship_ins = 7.01
+if "psa_custom_base" not in st.session_state:
+    st.session_state.psa_custom_base = 39.99
+
+
+def _on_psa_tier_change() -> None:
+    info = PSA_TIERS.get(st.session_state.psa_tier, PSA_TIERS["Value ($39.99 | Max $500)"])
+    st.session_state.psa_ship_ins = float(info["ship_ins"])
+    if st.session_state.psa_tier != "Custom":
+        st.session_state.psa_custom_base = float(info["base"])
 
 
 def _step_roi(delta: int) -> None:
@@ -983,6 +1053,8 @@ target_roi_pct = int(st.session_state.target_roi_pct)
 target_roi_decimal = target_roi_pct / 100.0
 anchor_key = "mean" if "Average" in st.session_state.anchor_mode else "median"
 anchor_label = "Average" if anchor_key == "mean" else "Median"
+active_platform_name, active_fee_rate = get_active_platform_fee()
+psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = get_active_psa_grading_cost()
 
 with st.sidebar:
     if LOGO_PATH.exists():
@@ -1082,15 +1154,6 @@ with st.sidebar:
                 for mh in cert_res["market_hits"]:
                     st.caption(f"💰 **{mh['source']}:** \\${mh['price']} ({mh['date']}) — {mh['title']}")
 
-    st.divider()
-    st.subheader("Fixed Friction Rules")
-    st.markdown(
-        f"""
-        - **eBay Final Value Fee:** {EBAY_FEE_RATE * 100:.2f}%
-        - **Outbound Shipping & Supplies:** \\${OUTBOUND_SHIPPING:.2f}
-        - **PSA All-In Grading (Path B):** \\${PSA_GRADING_COST:.2f}
-        """
-    )
 
 # ---------------------------------------------------------------------------
 # Main Header & Input Section (Matches villeinuscards.com Aesthetic)
@@ -1949,7 +2012,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                     st.markdown(
                         f"""
                         - **30-Day Raw {anchor_label} Anchor:** \\${path_a['median']:,.2f} ({raw_stats['count']} sales)
-                        - **Less eBay Final Value Fee (13.25%):** -\\${path_a['ebay_fee_median']:,.2f}
+                        - **Less {active_platform_name} Fee ({active_fee_rate * 100:.2f}%):** -\\${path_a['ebay_fee_median']:,.2f}
                         - **Less Outbound Bubble Mailer & Supplies:** -\\${path_a['shipping_cost']:,.2f}
                         - **Equals Net Payout:** **\\${path_a['net_payout']:,.2f}**
                         - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_a['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_a['max_buy']:,.2f} Max All-In Buy**
@@ -1961,7 +2024,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                         f"""
                         *If you buy at the Max All-In Buy (\\${path_a['max_buy']:,.2f}) and are forced to exit at the 25th-percentile floor (\\${path_a['floor_25']:,.2f}):*
                         - **Floor Sale Price:** \\${path_a['floor_25']:,.2f}
-                        - **Less eBay Fee (13.25%) & Shipping (\\$4.50):** -\\${path_a['ebay_fee_floor'] + path_a['shipping_cost']:,.2f}
+                        - **Less {active_platform_name} Fee ({active_fee_rate * 100:.2f}%) & Shipping (\\$4.50):** -\\${path_a['ebay_fee_floor'] + path_a['shipping_cost']:,.2f}
                         - **Floor Net Payout:** \\${path_a['net_payout_floor']:,.2f}
                         - **Worst-Case Net {floor_status}:** **\\${path_a['floor_profit_loss']:+,.2f}**
                         """
@@ -1974,7 +2037,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                     brand_heading(ICON_PATH_B, "PATH B — RAW-TO-PSA 10 GRADE"),
                     unsafe_allow_html=True,
                 )
-                st.caption("Buy Raw -> Grade with PSA ($47.00 all-in) -> Sell PSA 10")
+                st.caption(f"Buy Raw -> Grade with PSA ({psa_tier_short} ${psa_total_cost:.2f} all-in) -> Sell PSA 10")
 
                 b1, b2 = st.columns(2)
                 b1.metric(f"30-Day PSA 10 {anchor_label}", f"${path_b['median']:,.2f}")
@@ -2020,9 +2083,9 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                     st.markdown(
                         f"""
                         - **30-Day PSA 10 {anchor_label} Anchor:** \\${path_b['median']:,.2f} ({psa10_stats['count']} sales)
-                        - **Less eBay Final Value Fee (13.25%):** -\\${path_b['ebay_fee_median']:,.2f}
+                        - **Less {active_platform_name} Fee ({active_fee_rate * 100:.2f}%):** -\\${path_b['ebay_fee_median']:,.2f}
                         - **Less Outbound Bubble Mailer & Supplies:** -\\${path_b['shipping_cost']:,.2f}
-                        - **Less PSA All-In Grading Cost:** -\\${path_b['grading_cost']:,.2f} (\\$39.99 Value + \\$7.01 insured ship/prep)
+                        - **Less PSA All-In Grading Cost:** -\\${path_b['grading_cost']:,.2f} (\\${psa_base_fee:,.2f} {psa_tier_short} + \\${psa_ship_ins:,.2f} insured ship/prep)
                         - **Equals Net Payout:** **\\${path_b['net_payout']:,.2f}**
                         - **ROI Divisor (`1 + {target_roi_decimal:.2f}`):** \\${path_b['net_payout']:,.2f} / {1 + target_roi_decimal:.2f} = **\\${path_b['max_buy']:,.2f} Max All-In Buy**
                         """
@@ -2031,8 +2094,8 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                     st.markdown(
                         f"""
                         - **30-Day PSA 9 Median:** \\${bailout_9['psa9_median']:,.2f} ({psa9_stats['count']} sales)
-                        - **Less eBay Fee (13.25%):** -\\${bailout_9['ebay_fee_psa9']:,.2f}
-                        - **Less Mailer (\\$4.50) & PSA Grading (\\$47.00):** -\\$51.50
+                        - **Less {active_platform_name} Fee ({active_fee_rate * 100:.2f}%):** -\\${bailout_9['ebay_fee_psa9']:,.2f}
+                        - **Less Mailer (\\${OUTBOUND_SHIPPING:.2f}) & PSA Grading (\\${bailout_9['grading_cost']:,.2f}):** -\\${OUTBOUND_SHIPPING + bailout_9['grading_cost']:,.2f}
                         - **PSA 9 Net Payout (Zero-Risk Breakeven Buy Cap):** **\\${bailout_9['breakeven_buy_cap']:,.2f}**
                         - **Net Result if Bought at Path B Max Buy (\\${path_b['max_buy']:,.2f}):** **\\${bailout_9['bailout_profit_loss']:+,.2f}**
                         """
@@ -2104,7 +2167,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                 st.markdown(
                     f"""
                     - **30-Day {detected_condition} {anchor_label} Anchor:** \\${path_c['median']:,.2f} ({slab_stats['count']} sales)
-                    - **Less eBay Final Value Fee (13.25%):** -\\${path_c['ebay_fee_median']:,.2f}
+                    - **Less {active_platform_name} Fee ({active_fee_rate * 100:.2f}%):** -\\${path_c['ebay_fee_median']:,.2f}
                     - **Less Outbound Bubble Mailer & Supplies:** -\\${path_c['shipping_cost']:,.2f}
                     - **Grading Cost:** \\$0.00 (Already slabbed)
                     - **Equals Net Payout:** **\\${path_c['net_payout']:,.2f}**
@@ -2117,7 +2180,7 @@ def render_tier1(card_sales_data: dict, detected_condition: str, selected_card_t
                     f"""
                     *If you buy at the Max All-In Buy (\\${path_c['max_buy']:,.2f}) and are forced to exit at the 25th-percentile floor (\\${path_c['floor_25']:,.2f}):*
                     - **Floor Sale Price:** \\${path_c['floor_25']:,.2f}
-                    - **Less eBay Fee (13.25%) & Shipping (\\$4.50):** -\\${path_c['ebay_fee_floor'] + path_c['shipping_cost']:,.2f}
+                    - **Less {active_platform_name} Fee ({active_fee_rate * 100:.2f}%) & Shipping (\\$4.50):** -\\${path_c['ebay_fee_floor'] + path_c['shipping_cost']:,.2f}
                     - **Floor Net Payout:** \\${path_c['net_payout_floor']:,.2f}
                     - **Worst-Case Net {floor_c_status}:** **\\${path_c['floor_profit_loss']:+,.2f}**
                     """
@@ -2575,6 +2638,60 @@ elif data_mode == "Deal Finder":
         target_roi_decimal = target_roi_pct / 100.0
         anchor_key = "mean" if "Average" in st.session_state.anchor_mode else "median"
         anchor_label = "Average" if anchor_key == "mean" else "Median"
+        fp1, fp2 = st.columns([3.5, 1.2])
+        with fp1:
+            st.radio(
+                "Selling Platform (Auto-Sets Fee %)",
+                options=list(PLATFORM_FEE_RATES.keys()),
+                horizontal=True,
+                key="sell_platform",
+            )
+        with fp2:
+            if st.session_state.sell_platform == "Custom":
+                st.number_input(
+                    "Custom Fee %",
+                    min_value=0.0,
+                    max_value=50.0,
+                    step=0.25,
+                    format="%.2f",
+                    key="custom_fee_pct",
+                )
+        active_platform_name, active_fee_rate = get_active_platform_fee()
+        pt1, pt2, pt3 = st.columns([2.2, 1.2, 1.2])
+        with pt1:
+            st.selectbox(
+                "PSA Grading Tier (Path B)",
+                options=list(PSA_TIERS.keys()),
+                key="psa_tier",
+                on_change=_on_psa_tier_change,
+            )
+        with pt2:
+            st.number_input(
+                "PSA Ins. & Ship ($)",
+                min_value=0.0,
+                max_value=250.0,
+                step=0.50,
+                format="%.2f",
+                key="psa_ship_ins",
+                help="Amortized inbound/return shipping, insurance & prep per card. Auto-updates with tier, or adjust manually.",
+            )
+        with pt3:
+            if st.session_state.psa_tier == "Custom":
+                st.number_input(
+                    "Custom PSA Fee ($)",
+                    min_value=0.0,
+                    max_value=2000.0,
+                    step=1.00,
+                    format="%.2f",
+                    key="psa_custom_base",
+                )
+        psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = get_active_psa_grading_cost()
+        st.caption(
+            f"**Fixed Heist Overhead:** {active_platform_name} Fee: **{active_fee_rate * 100:.2f}%** • "
+            f"Outbound Shipping & Supplies: **\\${OUTBOUND_SHIPPING:.2f}** • "
+            f"PSA All-In Grading ({psa_tier_short}): **\\${psa_total_cost:.2f}** "
+            f"(\\${psa_base_fee:.2f} tier + \\${psa_ship_ins:.2f} ins/ship)"
+        )
     watchlist_text = st.text_area(
         "Watchlist (one search per line)",
         value="2023 Prizm Bijan Robinson Silver 305",
