@@ -2686,11 +2686,17 @@ elif data_mode == "Deal Finder":
                     key="psa_custom_base",
                 )
         psa_tier_short, psa_base_fee, psa_ship_ins, psa_total_cost = get_active_psa_grading_cost()
-        st.caption(
-            f"**Fixed Heist Overhead:** {active_platform_name} Fee: **{active_fee_rate * 100:.2f}%** • "
-            f"Outbound Shipping & Supplies: **\\${OUTBOUND_SHIPPING:.2f}** • "
-            f"PSA All-In Grading ({psa_tier_short}): **\\${psa_total_cost:.2f}** "
-            f"(\\${psa_base_fee:.2f} tier + \\${psa_ship_ins:.2f} ins/ship)"
+        st.markdown(
+            f"""
+            <div style="font-size:0.86rem; color:#e2e8f0; background:rgba(147,51,234,0.10); border:1px solid rgba(168,85,247,0.35); border-radius:8px; padding:7px 12px; margin-top:4px;">
+                <span style="color:#c084fc; font-weight:700; letter-spacing:0.04em;">FIXED HEIST OVERHEAD:</span>
+                {active_platform_name} Fee: <strong style="color:#f8fafc;">{active_fee_rate * 100:.2f}%</strong> &nbsp;•&nbsp;
+                Outbound Shipping &amp; Supplies: <strong style="color:#f8fafc;">${OUTBOUND_SHIPPING:.2f}</strong> &nbsp;•&nbsp;
+                PSA All-In Grading ({psa_tier_short}): <strong style="color:#f8fafc;">${psa_total_cost:.2f}</strong>
+                <span style="color:#cbd5e1;">(${psa_base_fee:.2f} tier + ${psa_ship_ins:.2f} ins/ship)</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
     watchlist_text = st.text_area(
         "Watchlist (one search per line)",
