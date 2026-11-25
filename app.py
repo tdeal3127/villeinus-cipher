@@ -300,7 +300,13 @@ _ZOOM_CAM_HTML = """<!DOCTYPE html>
   .cam-wrap { max-width: 420px; margin: 0 auto; background: #0f111a; border: 1px solid rgba(168, 85, 247, 0.45); border-radius: 12px; padding: 10px; }
   .viewport { position: relative; width: 100%; height: 360px; background: #05060a; border-radius: 8px; overflow: hidden; touch-action: none; display: flex; align-items: center; justify-content: center; }
   video { width: 100%; height: 100%; object-fit: cover; transform-origin: center center; transition: transform 0.05s linear; }
-  .hud-badge { position: absolute; top: 8px; left: 8px; background: rgba(15, 17, 26, 0.78); border: 1px solid rgba(192, 132, 252, 0.5); color: #e9d5ff; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; pointer-events: none; }
+  .hud-badge { position: absolute; top: 8px; left: 8px; background: rgba(15, 17, 26, 0.78); border: 1px solid rgba(192, 132, 252, 0.5); color: #e9d5ff; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; pointer-events: none; z-index: 3; }
+  .tilt-badge { position: absolute; top: 8px; right: 8px; background: rgba(15, 17, 26, 0.82); border: 1px solid rgba(148, 163, 184, 0.45); color: #e2e8f0; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; pointer-events: none; z-index: 3; display: none; }
+  .tilt-badge.is-level { border-color: #4ade80; color: #4ade80; }
+  .tilt-badge.is-tilted { border-color: #fbbf24; color: #fbbf24; }
+  .guide-frame { position: absolute; height: 82%; aspect-ratio: 5 / 7; border: 2px dashed rgba(34, 211, 238, 0.85); border-radius: 6px; box-shadow: 0 0 0 9999px rgba(5, 6, 10, 0.22); pointer-events: none; z-index: 2; display: none; }
+  .guide-cross-h { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: rgba(34, 211, 238, 0.35); }
+  .guide-cross-v { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: rgba(34, 211, 238, 0.35); }
   .controls { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .preset-row { display: flex; align-items: center; gap: 6px; }
   .preset-btn { flex: 1; background: #1a1c29; color: #e2e8f0; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 6px; padding: 6px 0; font-size: 12px; font-weight: 700; cursor: pointer; }
@@ -317,7 +323,9 @@ _ZOOM_CAM_HTML = """<!DOCTYPE html>
 <div class="cam-wrap" id="wrap">
   <div class="viewport" id="viewport">
     <video id="video" autoplay playsinline muted></video>
+    <div class="guide-frame" id="guideFrame"><div class="guide-cross-h"></div><div class="guide-cross-v"></div></div>
     <div class="hud-badge" id="hud">1.0x</div>
+    <div class="tilt-badge" id="tiltBadge">Level: --</div>
   </div>
   <div class="controls">
     <div class="preset-row" id="presets">
@@ -340,6 +348,7 @@ _ZOOM_CAM_HTML = """<!DOCTYPE html>
   function sendMsg(type, payload) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload || {}), "*"); }
   function setHeight() { sendMsg("streamlit:setFrameHeight", { height: document.getElementById("wrap").offsetHeight + 16 }); }
   var video = document.getElementById("video"), viewport = document.getElementById("viewport"), hud = document.getElementById("hud");
+  var guideFrame = document.getElementById("guideFrame"), tiltBadge = document.getElementById("tiltBadge");
   var slider = document.getElementById("zoomSlider"), zoomVal = document.getElementById("zoomVal"), statusEl = document.getElementById("status"), snapBtn = document.getElementById("snapBtn");
   var presetBtns = Array.prototype.slice.call(document.querySelectorAll(".preset-btn"));
   var stream = null, track = null, hwZoomSupported = false, minZ = 1.0, maxZ = 5.0, curZ = 1.0, pinchStartDist = null, pinchStartZoom = 1.0;
@@ -397,7 +406,24 @@ _ZOOM_CAM_HTML = """<!DOCTYPE html>
     statusEl.textContent = "✅ Photo snapped at " + curZ.toFixed(1) + "x! Processing...";
     sendMsg("streamlit:setComponentValue", { value: canvas.toDataURL("image/jpeg", 0.92) });
   });
-  window.addEventListener("message", function (event) { if (event.data && event.data.type === "streamlit:render") { setHeight(); } });
+  window.addEventListener("message", function (event) {
+    if (event.data && event.data.type === "streamlit:render") {
+      var args = event.data.args || {};
+      var showGuide = !!args.levelGuide;
+      guideFrame.style.display = showGuide ? "block" : "none";
+      tiltBadge.style.display = showGuide ? "block" : "none";
+      setHeight();
+    }
+  });
+  window.addEventListener("deviceorientation", function (e) {
+    if (tiltBadge.style.display === "none") return;
+    if (e.beta === null && e.gamma === null) return;
+    var fb = Math.abs(e.beta || 0);
+    var lr = Math.abs(e.gamma || 0);
+    var isLevel = (fb <= 2.5 && lr <= 2.5);
+    tiltBadge.className = "tilt-badge " + (isLevel ? "is-level" : "is-tilted");
+    tiltBadge.textContent = isLevel ? "LEVEL ✓" : ("Tilt " + lr.toFixed(1) + "° / " + fb.toFixed(1) + "°");
+  });
   window.addEventListener("pagehide", stopCamera);
   window.addEventListener("beforeunload", stopCamera);
   sendMsg("streamlit:componentReady", { apiVersion: 1 });
@@ -425,11 +451,11 @@ def _init_zoom_camera_component():
 _zoom_camera_component = _init_zoom_camera_component()
 
 
-def zoom_camera_input(key: str) -> bytes | None:
+def zoom_camera_input(key: str, level_guide: bool = False) -> bytes | None:
     """Render the pinch-to-zoom rear camera component and return JPEG bytes when snapped."""
     if _zoom_camera_component is None:
         return None
-    data_url = _zoom_camera_component(key=key, default=None)
+    data_url = _zoom_camera_component(key=key, levelGuide=level_guide, default=None)
     if not data_url or not isinstance(data_url, str) or "," not in data_url:
         return None
     last_key = f"_last_zcam_{key}"
@@ -2562,8 +2588,8 @@ if centering_open:
             st.caption("Camera is **OFF**. Flip **📸 Start Rear Camera** on when you're ready to snap.")
         else:
             if _zoom_camera_component is not None:
-                st.caption("📸 **Pinch screen or use 1x–5x slider to zoom, then tap Snap Photo!**")
-                c_snap_bytes = zoom_camera_input(key=f"center_zcam_{ctr_v}")
+                st.caption("📸 **Line up the card inside the cyan frame until LEVEL ✓ appears, then tap Snap Photo!**")
+                c_snap_bytes = zoom_camera_input(key=f"center_zcam_{ctr_v}", level_guide=True)
                 if c_snap_bytes is not None:
                     st.session_state["centering_img_bytes"] = c_snap_bytes
             else:
@@ -2634,8 +2660,38 @@ if centering_open:
         with b_col2:
             if st.button("🗑️ Clear Photo", key="ctr_clear", use_container_width=True):
                 st.session_state.pop("centering_img_bytes", None)
+                st.session_state["ctr_rotate_deg"] = 0.0
                 st.session_state["ctr_ver"] = st.session_state.get("ctr_ver", 0) + 1
                 st.rerun()
+
+        if "ctr_rotate_deg" not in st.session_state:
+            st.session_state["ctr_rotate_deg"] = 0.0
+        rot_c1, rot_c2, rot_c3 = st.columns([2.2, 0.7, 0.7])
+        with rot_c1:
+            rot_deg = st.slider(
+                "📐 Straighten / Rotate (°)",
+                min_value=-10.0,
+                max_value=10.0,
+                step=0.2,
+                key="ctr_rotate_deg",
+                help="Fine-tune rotation so the card edges sit flush against the cyan/rose centering lines.",
+            )
+        with rot_c2:
+            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+            st.button(
+                "↺ -0.2°",
+                key="ctr_rot_minus",
+                on_click=lambda: st.session_state.update({"ctr_rotate_deg": round(max(-10.0, float(st.session_state.get("ctr_rotate_deg", 0.0)) - 0.2), 1)}),
+                use_container_width=True,
+            )
+        with rot_c3:
+            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+            st.button(
+                "↻ +0.2°",
+                key="ctr_rot_plus",
+                on_click=lambda: st.session_state.update({"ctr_rotate_deg": round(min(10.0, float(st.session_state.get("ctr_rotate_deg", 0.0)) + 0.2), 1)}),
+                use_container_width=True,
+            )
 
         import streamlit.components.v1 as components
 
@@ -2643,6 +2699,8 @@ if centering_open:
         # Resize for fast, crisp mobile canvas rendering while preserving exact aspect ratio
         disp_img = img.copy()
         disp_img.thumbnail((900, 900))
+        if abs(rot_deg) >= 0.05:
+            disp_img = disp_img.rotate(-rot_deg, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=(15, 17, 26))
         buf = BytesIO()
         disp_img.save(buf, format="JPEG", quality=88)
         img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
