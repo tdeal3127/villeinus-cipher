@@ -916,31 +916,13 @@ def fetch_live_graded_auctions(
 
 @st.cache_data(ttl=900, show_spinner=False)
 def lookup_psa_cert(cert_num: str, psa_token: str, cs_key: str) -> dict:
-    """Query PSA Public API GetByCertNumber and cross-check recent marketplace sales for that Cert #."""
+    """Build official PSA Cert link and cross-check recent marketplace sales for that Cert #."""
     clean_cert = re.sub(r"\D", "", cert_num or "")
     if not clean_cert:
         return {"ok": False, "error": "Enter a numeric PSA Cert #."}
 
     psa_data = None
     psa_msg = ""
-    if psa_token.strip():
-        try:
-            r = requests.get(
-                f"https://api.psacard.com/publicapi/cert/GetByCertNumber/{clean_cert}",
-                headers={
-                    "Authorization": f"bearer {psa_token.strip()}",
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                },
-                timeout=15,
-            )
-            if r.status_code == 200:
-                body = r.json()
-                psa_data = body.get("PSACert") or body
-            else:
-                psa_msg = r.json().get("Message", f"HTTP {r.status_code}")
-        except Exception as exc:
-            psa_msg = str(exc)
 
     market_hits: list[dict] = []
     if cs_key.strip():
@@ -1451,28 +1433,18 @@ with st.sidebar:
     psa_cert_input = st.text_input(
         "Verify PSA Cert # (e.g. 100855050)",
         placeholder="Enter 8-9 digit Cert #...",
-        help="Checks PSA's Public API and cross-searches recent eBay/Auction sales for that exact slab.",
+        help="Opens the official PSA Cert page and cross-searches recent eBay/Auction sales for that exact slab.",
     )
     if psa_cert_input.strip():
         cert_res = lookup_psa_cert(
             psa_cert_input.strip(),
-            get_secret_key("PSA_API_TOKEN"),
+            "",
             get_secret_key("COMPSNIPER_API_KEY"),
         )
         if not cert_res["ok"]:
             st.warning(cert_res["error"])
         else:
             st.markdown(f"🔗 **[Open Official PSA Cert #{cert_res['cert']} Page ↗]({cert_res['cert_url']})**")
-            if cert_res["psa_data"]:
-                p = cert_res["psa_data"]
-                st.success(
-                    f"**{p.get('Year', '')} {p.get('Brand', '')} #{p.get('CardNumber', '')}**\n\n"
-                    f"Subject: **{p.get('Subject', '')}** ({p.get('Variety', '')})\n\n"
-                    f"Grade: **PSA {p.get('CardGrade', '')}** | Pop: **{p.get('TotalPopulation', 'N/A')}** "
-                    f"(Higher: {p.get('PopulationHigher', 0)})"
-                )
-            elif cert_res["psa_msg"]:
-                st.caption(f"ℹ️ PSA API Status: {cert_res['psa_msg']}")
             if cert_res["market_hits"]:
                 for mh in cert_res["market_hits"]:
                     st.caption(f"💰 **{mh['source']}:** \\${mh['price']} ({mh['date']}) — {mh['title']}")
