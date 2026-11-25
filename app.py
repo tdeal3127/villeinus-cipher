@@ -2663,38 +2663,8 @@ if centering_open:
         with b_col2:
             if st.button("🗑️ Clear Photo", key="ctr_clear", use_container_width=True):
                 st.session_state.pop("centering_img_bytes", None)
-                st.session_state["ctr_rotate_deg"] = 0.0
                 st.session_state["ctr_ver"] = st.session_state.get("ctr_ver", 0) + 1
                 st.rerun()
-
-        if "ctr_rotate_deg" not in st.session_state:
-            st.session_state["ctr_rotate_deg"] = 0.0
-        rot_c1, rot_c2, rot_c3 = st.columns([2.2, 0.7, 0.7])
-        with rot_c1:
-            rot_deg = st.slider(
-                "📐 Straighten / Rotate (°)",
-                min_value=-10.0,
-                max_value=10.0,
-                step=0.2,
-                key="ctr_rotate_deg",
-                help="Fine-tune rotation so the card edges sit flush against the cyan/rose centering lines.",
-            )
-        with rot_c2:
-            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-            st.button(
-                "↺ -0.2°",
-                key="ctr_rot_minus",
-                on_click=lambda: st.session_state.update({"ctr_rotate_deg": round(max(-10.0, float(st.session_state.get("ctr_rotate_deg", 0.0)) - 0.2), 1)}),
-                use_container_width=True,
-            )
-        with rot_c3:
-            st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-            st.button(
-                "↻ +0.2°",
-                key="ctr_rot_plus",
-                on_click=lambda: st.session_state.update({"ctr_rotate_deg": round(min(10.0, float(st.session_state.get("ctr_rotate_deg", 0.0)) + 0.2), 1)}),
-                use_container_width=True,
-            )
 
         import streamlit.components.v1 as components
 
@@ -2702,14 +2672,12 @@ if centering_open:
         # Resize for fast, crisp mobile canvas rendering while preserving exact aspect ratio
         disp_img = img.copy()
         disp_img.thumbnail((900, 900))
-        if abs(rot_deg) >= 0.05:
-            disp_img = disp_img.rotate(-rot_deg, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=(15, 17, 26))
         buf = BytesIO()
         disp_img.save(buf, format="JPEG", quality=88)
         img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         dw, dh = disp_img.size
         rendered_img_h = min(460, int(420 * (dh / max(dw, 1))))
-        canvas_h = rendered_img_h + 235
+        canvas_h = rendered_img_h + 265
 
         init_vals = {
             "ol": float(st.session_state["ctr_ol"]),
@@ -2725,7 +2693,37 @@ if centering_open:
         components.html(
             f"""
             <div style="font-family: system-ui, -apple-system, sans-serif; color:#f8fafc; background:#0b0714; border:1px solid #3b1d6e; border-radius:12px; padding:10px; max-width:520px; margin:0 auto;">
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-bottom:8px; flex-wrap:wrap;">
+                <div style="font-size:11px; color:#cbd5e1; text-align:center; margin-bottom:6px;">
+                    👆 <b>Drag any line directly on the card</b> &bull; <span style="color:#38bdf8;">Cyan = Outer Edge</span> &bull; <span style="color:#f43f5e;">Rose = Inner Border</span>
+                </div>
+                <div style="display:flex; align-items:center; justify-content:center; gap:5px; margin-bottom:6px; flex-wrap:wrap;">
+                    <span style="font-size:11px; color:#94a3b8; font-weight:700;">ZOOM:</span>
+                    <button class="ctr-zbtn" data-z="1" style="background:#7e22ce; color:#fff; border:1px solid #c084fc; border-radius:6px; padding:4px 9px; font-size:11px; font-weight:700; cursor:pointer;">1x</button>
+                    <button class="ctr-zbtn" data-z="1.5" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 9px; font-size:11px; font-weight:700; cursor:pointer;">1.5x</button>
+                    <button class="ctr-zbtn" data-z="2" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 9px; font-size:11px; font-weight:700; cursor:pointer;">2x</button>
+                    <button class="ctr-zbtn" data-z="3" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 9px; font-size:11px; font-weight:700; cursor:pointer;">3x</button>
+                    <button class="ctr-zbtn" data-z="4" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 9px; font-size:11px; font-weight:700; cursor:pointer;">4x</button>
+                </div>
+                <div style="display:flex; align-items:center; justify-content:center; gap:5px; margin-bottom:8px; flex-wrap:wrap;">
+                    <span style="font-size:11px; color:#94a3b8; font-weight:700;">ROTATE:</span>
+                    <button class="ctr-rbtn" data-d="-0.5" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;">↺ -0.5°</button>
+                    <button class="ctr-rbtn" data-d="-0.1" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;">↺ -0.1°</button>
+                    <span id="rotOut" style="font-size:12px; font-weight:700; color:#c084fc; min-width:46px; text-align:center;">0.0°</span>
+                    <button class="ctr-rbtn" data-d="0.1" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;">↻ +0.1°</button>
+                    <button class="ctr-rbtn" data-d="0.5" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;">↻ +0.5°</button>
+                    <button id="rotReset" style="background:#1a1c29; color:#94a3b8; border:1px solid #475569; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;">Reset</button>
+                </div>
+                <div id="ctrViewport" style="max-width:100%; max-height:460px; overflow:auto; border-radius:8px; background:#05060a; text-align:center;">
+                    <canvas id="ctrCanvas" style="max-width:100%; max-height:460px; width:auto; height:auto; margin:0 auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
+                </div>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:8px;">
+                    <span id="activeLbl" style="font-size:12px; color:#c084fc; font-weight:700;">Selected: Outer Left</span>
+                    <div style="display:flex; gap:6px;">
+                        <button id="nudgeMinus" style="background:#1e1136; color:#fff; border:1px solid #6d28d9; border-radius:6px; padding:6px 14px; font-weight:700; cursor:pointer;">-0.2%</button>
+                        <button id="nudgePlus" style="background:#1e1136; color:#fff; border:1px solid #6d28d9; border-radius:6px; padding:6px 14px; font-weight:700; cursor:pointer;">+0.2%</button>
+                    </div>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-top:10px; flex-wrap:wrap;">
                     <div style="background:#160d28; border:1px solid #4c1d95; border-radius:8px; padding:6px 10px; flex:1; text-align:center;">
                         <div style="font-size:11px; color:#94a3b8;">LEFT / RIGHT</div>
                         <div id="lrOut" style="font-size:15px; font-weight:800; color:#f8fafc;">--</div>
@@ -2737,27 +2735,6 @@ if centering_open:
                     <div style="background:#160d28; border:1px solid #4c1d95; border-radius:8px; padding:6px 10px; flex:1.15; text-align:center;">
                         <div style="font-size:11px; color:#94a3b8;">PSA 10 / SGC 10</div>
                         <div id="verdictOut" style="font-size:14px; font-weight:800;">--</div>
-                    </div>
-                </div>
-                <div style="font-size:11px; color:#cbd5e1; text-align:center; margin-bottom:6px;">
-                    👆 <b>Drag any line directly on the card</b> &bull; <span style="color:#38bdf8;">Cyan = Outer Edge</span> &bull; <span style="color:#f43f5e;">Rose = Inner Border</span>
-                </div>
-                <div style="display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:8px;">
-                    <span style="font-size:11px; color:#94a3b8; font-weight:700;">LOUPE ZOOM:</span>
-                    <button class="ctr-zbtn" data-z="1" style="background:#7e22ce; color:#fff; border:1px solid #c084fc; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">1x</button>
-                    <button class="ctr-zbtn" data-z="1.5" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">1.5x</button>
-                    <button class="ctr-zbtn" data-z="2" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">2x</button>
-                    <button class="ctr-zbtn" data-z="3" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">3x</button>
-                    <button class="ctr-zbtn" data-z="4" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">4x</button>
-                </div>
-                <div id="ctrViewport" style="max-width:100%; max-height:460px; overflow:auto; border-radius:8px; background:#05060a; text-align:center;">
-                    <canvas id="ctrCanvas" style="max-width:100%; max-height:460px; width:auto; height:auto; margin:0 auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
-                </div>
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:8px;">
-                    <span id="activeLbl" style="font-size:12px; color:#c084fc; font-weight:700;">Selected: Outer Left</span>
-                    <div style="display:flex; gap:6px;">
-                        <button id="nudgeMinus" style="background:#1e1136; color:#fff; border:1px solid #6d28d9; border-radius:6px; padding:6px 14px; font-weight:700; cursor:pointer;">-0.2%</button>
-                        <button id="nudgePlus" style="background:#1e1136; color:#fff; border:1px solid #6d28d9; border-radius:6px; padding:6px 14px; font-weight:700; cursor:pointer;">+0.2%</button>
                     </div>
                 </div>
             </div>
@@ -2776,9 +2753,18 @@ if centering_open:
                 let activeKey = 'ol';
                 let dragging = null;
                 let panning = false, panStartX = 0, panStartY = 0, panScrollL = 0, panScrollT = 0;
-                let loupeZoom = 1.0, baseW = 0, baseH = 0;
+                let loupeZoom = 1.0, baseW = 0, baseH = 0, rotDeg = 0.0;
                 const vp = document.getElementById('ctrViewport');
                 const zBtns = Array.from(document.querySelectorAll('.ctr-zbtn'));
+                const rBtns = Array.from(document.querySelectorAll('.ctr-rbtn'));
+                const rotOut = document.getElementById('rotOut');
+                function setRot(deg) {{
+                    rotDeg = Math.max(-15.0, Math.min(15.0, Math.round(deg * 10) / 10));
+                    rotOut.textContent = rotDeg.toFixed(1) + '°';
+                    draw();
+                }}
+                rBtns.forEach(b => b.addEventListener('click', () => setRot(rotDeg + parseFloat(b.dataset.d))));
+                document.getElementById('rotReset').addEventListener('click', () => setRot(0.0));
 
                 function setLoupeZoom(z) {{
                     if (!baseW || !baseH) {{
@@ -2849,7 +2835,13 @@ if centering_open:
 
                 function draw() {{
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    ctx.save();
+                    ctx.fillStyle = '#0f111a';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.translate(canvas.width / 2, canvas.height / 2);
+                    ctx.rotate(rotDeg * Math.PI / 180);
+                    ctx.drawImage(img, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+                    ctx.restore();
                     const lw = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.005));
                     const lines = [
                         ['ol', 'v', '#38bdf8'], ['il', 'v', '#f43f5e'],
