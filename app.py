@@ -300,8 +300,9 @@ _ZOOM_CAM_HTML = """<!DOCTYPE html>
   .cam-wrap { max-width: 420px; margin: 0 auto; background: #0f111a; border: 1px solid rgba(168, 85, 247, 0.45); border-radius: 12px; padding: 10px; }
   .viewport { position: relative; width: 100%; height: 360px; background: #05060a; border-radius: 8px; overflow: hidden; touch-action: none; display: flex; align-items: center; justify-content: center; }
   video { width: 100%; height: 100%; object-fit: cover; transform-origin: center center; transition: transform 0.05s linear; }
-  .hud-badge { position: absolute; top: 8px; left: 8px; background: rgba(15, 17, 26, 0.78); border: 1px solid rgba(192, 132, 252, 0.5); color: #e9d5ff; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; pointer-events: none; z-index: 3; }
-  .tilt-badge { position: absolute; top: 8px; right: 8px; background: rgba(15, 17, 26, 0.82); border: 1px solid rgba(148, 163, 184, 0.45); color: #e2e8f0; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; pointer-events: none; z-index: 3; display: none; }
+  .top-status-bar { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 6px; min-height: 24px; }
+  .hud-badge { background: rgba(147, 51, 234, 0.16); border: 1px solid rgba(192, 132, 252, 0.5); color: #e9d5ff; font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
+  .tilt-badge { background: rgba(15, 17, 26, 0.85); border: 1px solid rgba(148, 163, 184, 0.45); color: #e2e8f0; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px; display: none; }
   .tilt-badge.is-level { border-color: #4ade80; color: #4ade80; }
   .tilt-badge.is-tilted { border-color: #fbbf24; color: #fbbf24; }
   .guide-frame { position: absolute; height: 82%; aspect-ratio: 5 / 7; border: 2px dashed rgba(34, 211, 238, 0.85); border-radius: 6px; box-shadow: 0 0 0 9999px rgba(5, 6, 10, 0.22); pointer-events: none; z-index: 2; display: none; }
@@ -321,11 +322,13 @@ _ZOOM_CAM_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="cam-wrap" id="wrap">
+  <div class="top-status-bar">
+    <div class="hud-badge" id="hud">1.0x</div>
+    <div class="tilt-badge" id="tiltBadge">Level: --</div>
+  </div>
   <div class="viewport" id="viewport">
     <video id="video" autoplay playsinline muted></video>
     <div class="guide-frame" id="guideFrame"><div class="guide-cross-h"></div><div class="guide-cross-v"></div></div>
-    <div class="hud-badge" id="hud">1.0x</div>
-    <div class="tilt-badge" id="tiltBadge">Level: --</div>
   </div>
   <div class="controls">
     <div class="preset-row" id="presets">
@@ -2706,7 +2709,7 @@ if centering_open:
         img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         dw, dh = disp_img.size
         rendered_img_h = min(460, int(420 * (dh / max(dw, 1))))
-        canvas_h = rendered_img_h + 185
+        canvas_h = rendered_img_h + 235
 
         init_vals = {
             "ol": float(st.session_state["ctr_ol"]),
@@ -2739,7 +2742,17 @@ if centering_open:
                 <div style="font-size:11px; color:#cbd5e1; text-align:center; margin-bottom:6px;">
                     👆 <b>Drag any line directly on the card</b> &bull; <span style="color:#38bdf8;">Cyan = Outer Edge</span> &bull; <span style="color:#f43f5e;">Rose = Inner Border</span>
                 </div>
-                <canvas id="ctrCanvas" style="max-width:100%; max-height:460px; width:auto; height:auto; margin:0 auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
+                <div style="display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:8px;">
+                    <span style="font-size:11px; color:#94a3b8; font-weight:700;">LOUPE ZOOM:</span>
+                    <button class="ctr-zbtn" data-z="1" style="background:#7e22ce; color:#fff; border:1px solid #c084fc; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">1x</button>
+                    <button class="ctr-zbtn" data-z="1.5" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">1.5x</button>
+                    <button class="ctr-zbtn" data-z="2" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">2x</button>
+                    <button class="ctr-zbtn" data-z="3" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">3x</button>
+                    <button class="ctr-zbtn" data-z="4" style="background:#1e1136; color:#e2e8f0; border:1px solid #6d28d9; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer;">4x</button>
+                </div>
+                <div id="ctrViewport" style="max-width:100%; max-height:460px; overflow:auto; border-radius:8px; background:#05060a; text-align:center;">
+                    <canvas id="ctrCanvas" style="max-width:100%; max-height:460px; width:auto; height:auto; margin:0 auto; display:block; border-radius:8px; touch-action:none; cursor:grab;"></canvas>
+                </div>
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:8px;">
                     <span id="activeLbl" style="font-size:12px; color:#c084fc; font-weight:700;">Selected: Outer Left</span>
                     <div style="display:flex; gap:6px;">
@@ -2762,6 +2775,36 @@ if centering_open:
                 }};
                 let activeKey = 'ol';
                 let dragging = null;
+                let panning = false, panStartX = 0, panStartY = 0, panScrollL = 0, panScrollT = 0;
+                let loupeZoom = 1.0, baseW = 0, baseH = 0;
+                const vp = document.getElementById('ctrViewport');
+                const zBtns = Array.from(document.querySelectorAll('.ctr-zbtn'));
+
+                function setLoupeZoom(z) {{
+                    if (!baseW || !baseH) {{
+                        const r = canvas.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {{ baseW = r.width; baseH = r.height; }}
+                    }}
+                    loupeZoom = z;
+                    zBtns.forEach(b => {{
+                        const active = parseFloat(b.dataset.z) === z;
+                        b.style.background = active ? '#7e22ce' : '#1e1136';
+                        b.style.borderColor = active ? '#c084fc' : '#6d28d9';
+                        b.style.color = active ? '#ffffff' : '#e2e8f0';
+                    }});
+                    if (z <= 1.0 || !baseW) {{
+                        canvas.style.maxWidth = '100%';
+                        canvas.style.maxHeight = '460px';
+                        canvas.style.width = 'auto';
+                        canvas.style.height = 'auto';
+                    }} else {{
+                        canvas.style.maxWidth = 'none';
+                        canvas.style.maxHeight = 'none';
+                        canvas.style.width = Math.round(baseW * z) + 'px';
+                        canvas.style.height = Math.round(baseH * z) + 'px';
+                    }}
+                }}
+                zBtns.forEach(b => b.addEventListener('click', () => setLoupeZoom(parseFloat(b.dataset.z))));
 
                 function clampVal(k, v) {{
                     if (k === 'ol' || k === 'il' || k === 'ot' || k === 'it') return Math.max(0.5, Math.min(49.5, v));
@@ -2862,10 +2905,23 @@ if centering_open:
                         activeKey = best;
                         canvas.setPointerCapture(e.pointerId);
                         draw();
+                    }} else if (loupeZoom > 1.0) {{
+                        panning = true;
+                        panStartX = e.clientX;
+                        panStartY = e.clientY;
+                        panScrollL = vp.scrollLeft;
+                        panScrollT = vp.scrollTop;
+                        canvas.setPointerCapture(e.pointerId);
                     }}
                 }});
 
                 canvas.addEventListener('pointermove', (e) => {{
+                    if (panning) {{
+                        e.preventDefault();
+                        vp.scrollLeft = panScrollL - (e.clientX - panStartX);
+                        vp.scrollTop = panScrollT - (e.clientY - panStartY);
+                        return;
+                    }}
                     if (!dragging) return;
                     e.preventDefault();
                     const p = getPos(e);
@@ -2874,8 +2930,8 @@ if centering_open:
                     draw();
                 }});
 
-                canvas.addEventListener('pointerup', () => {{ dragging = null; }});
-                canvas.addEventListener('pointercancel', () => {{ dragging = null; }});
+                canvas.addEventListener('pointerup', () => {{ dragging = null; panning = false; }});
+                canvas.addEventListener('pointercancel', () => {{ dragging = null; panning = false; }});
 
                 document.getElementById('nudgeMinus').addEventListener('click', () => {{
                     vals[activeKey] = clampVal(activeKey, vals[activeKey] - 0.2);
