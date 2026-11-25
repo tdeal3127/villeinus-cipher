@@ -289,12 +289,140 @@ LOGO_PATH = (
     else Path(__file__).parent / "assets" / "logo.png"
 )
 
-_ZOOM_CAM_DIR = Path(__file__).parent / "components" / "zoom_camera"
-_zoom_camera_component = (
-    components.declare_component("zoom_camera", path=str(_ZOOM_CAM_DIR))
-    if (_ZOOM_CAM_DIR / "index.html").exists()
-    else None
-)
+_ZOOM_CAM_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: transparent; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  .cam-wrap { max-width: 420px; margin: 0 auto; background: #0f111a; border: 1px solid rgba(168, 85, 247, 0.45); border-radius: 12px; padding: 10px; }
+  .viewport { position: relative; width: 100%; height: 360px; background: #05060a; border-radius: 8px; overflow: hidden; touch-action: none; display: flex; align-items: center; justify-content: center; }
+  video { width: 100%; height: 100%; object-fit: cover; transform-origin: center center; transition: transform 0.05s linear; }
+  .hud-badge { position: absolute; top: 8px; left: 8px; background: rgba(15, 17, 26, 0.78); border: 1px solid rgba(192, 132, 252, 0.5); color: #e9d5ff; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; pointer-events: none; }
+  .controls { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .preset-row { display: flex; align-items: center; gap: 6px; }
+  .preset-btn { flex: 1; background: #1a1c29; color: #e2e8f0; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 6px; padding: 6px 0; font-size: 12px; font-weight: 700; cursor: pointer; }
+  .preset-btn.active { background: #7e22ce; border-color: #c084fc; color: #ffffff; }
+  .slider-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cbd5e1; }
+  input[type="range"] { flex: 1; accent-color: #a855f7; }
+  .snap-btn { width: 100%; background: linear-gradient(90deg, #9333ea, #7e22ce); color: #ffffff; border: 1px solid #c084fc; border-radius: 8px; padding: 10px 14px; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .snap-btn:active { opacity: 0.85; }
+  .status { font-size: 12px; color: #94a3b8; text-align: center; min-height: 16px; }
+  .err { color: #fca5a5; }
+</style>
+</head>
+<body>
+<div class="cam-wrap" id="wrap">
+  <div class="viewport" id="viewport">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="hud-badge" id="hud">1.0x</div>
+  </div>
+  <div class="controls">
+    <div class="preset-row" id="presets">
+      <button class="preset-btn active" data-z="1">1x</button>
+      <button class="preset-btn" data-z="2">2x</button>
+      <button class="preset-btn" data-z="3">3x</button>
+      <button class="preset-btn" data-z="5">5x</button>
+    </div>
+    <div class="slider-row">
+      <span>Zoom</span>
+      <input type="range" id="zoomSlider" min="1" max="5" step="0.1" value="1" />
+      <span id="zoomVal">1.0x</span>
+    </div>
+    <button class="snap-btn" id="snapBtn">📸 Snap Photo</button>
+    <div class="status" id="status">Pinch screen or use slider to zoom</div>
+  </div>
+</div>
+<script>
+(function () {
+  function sendMsg(type, payload) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload || {}), "*"); }
+  function setHeight() { sendMsg("streamlit:setFrameHeight", { height: document.getElementById("wrap").offsetHeight + 16 }); }
+  var video = document.getElementById("video"), viewport = document.getElementById("viewport"), hud = document.getElementById("hud");
+  var slider = document.getElementById("zoomSlider"), zoomVal = document.getElementById("zoomVal"), statusEl = document.getElementById("status"), snapBtn = document.getElementById("snapBtn");
+  var presetBtns = Array.prototype.slice.call(document.querySelectorAll(".preset-btn"));
+  var stream = null, track = null, hwZoomSupported = false, minZ = 1.0, maxZ = 5.0, curZ = 1.0, pinchStartDist = null, pinchStartZoom = 1.0;
+
+  function updatePresetHighlight(z) {
+    presetBtns.forEach(function (b) { b.classList.toggle("active", Math.abs(parseFloat(b.getAttribute("data-z")) - z) < 0.15); });
+  }
+  function applyZoom(z) {
+    curZ = Math.max(minZ, Math.min(maxZ, z));
+    slider.value = curZ.toFixed(1);
+    zoomVal.textContent = curZ.toFixed(1) + "x";
+    hud.textContent = curZ.toFixed(1) + "x" + (hwZoomSupported ? " (Optical/HW)" : " (Digital)");
+    updatePresetHighlight(curZ);
+    if (hwZoomSupported && track) {
+      video.style.transform = "scale(1)";
+      track.applyConstraints({ advanced: [{ zoom: curZ }] }).catch(function () { hwZoomSupported = false; video.style.transform = "scale(" + curZ + ")"; });
+    } else {
+      video.style.transform = "scale(" + curZ + ")";
+    }
+  }
+  async function startCamera() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+      video.srcObject = stream;
+      track = stream.getVideoTracks()[0] || null;
+      if (track && typeof track.getCapabilities === "function") {
+        var caps = track.getCapabilities();
+        if (caps && caps.zoom && typeof caps.zoom.max === "number" && caps.zoom.max > 1) {
+          hwZoomSupported = true;
+          minZ = Math.max(1.0, caps.zoom.min || 1.0);
+          maxZ = Math.min(10.0, caps.zoom.max);
+          slider.min = minZ.toFixed(1); slider.max = maxZ.toFixed(1);
+          slider.step = (caps.zoom.step && caps.zoom.step > 0) ? caps.zoom.step : 0.1;
+        }
+      }
+      applyZoom(1.0); setHeight();
+    } catch (err) {
+      statusEl.textContent = "Camera error: " + (err && err.message ? err.message : "permission denied");
+      statusEl.classList.add("err"); setHeight();
+    }
+  }
+  function stopCamera() { if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; track = null; } }
+  presetBtns.forEach(function (btn) { btn.addEventListener("click", function () { applyZoom(parseFloat(btn.getAttribute("data-z"))); }); });
+  slider.addEventListener("input", function () { applyZoom(parseFloat(slider.value)); });
+  function touchDist(t1, t2) { var dx = t1.clientX - t2.clientX, dy = t1.clientY - t2.clientY; return Math.sqrt(dx * dx + dy * dy); }
+  viewport.addEventListener("touchstart", function (e) { if (e.touches.length === 2) { pinchStartDist = touchDist(e.touches[0], e.touches[1]); pinchStartZoom = curZ; } }, { passive: false });
+  viewport.addEventListener("touchmove", function (e) { if (e.touches.length === 2 && pinchStartDist) { e.preventDefault(); applyZoom(pinchStartZoom * (touchDist(e.touches[0], e.touches[1]) / pinchStartDist)); } }, { passive: false });
+  viewport.addEventListener("touchend", function (e) { if (e.touches.length < 2) { pinchStartDist = null; } });
+  snapBtn.addEventListener("click", function () {
+    if (!video.videoWidth || !video.videoHeight) return;
+    var vw = video.videoWidth, vh = video.videoHeight, canvas = document.createElement("canvas"), ctx = canvas.getContext("2d");
+    canvas.width = vw; canvas.height = vh;
+    if (hwZoomSupported) { ctx.drawImage(video, 0, 0, vw, vh); }
+    else { var cropW = vw / curZ, cropH = vh / curZ; ctx.drawImage(video, (vw - cropW) / 2, (vh - cropH) / 2, cropW, cropH, 0, 0, vw, vh); }
+    statusEl.textContent = "✅ Photo snapped at " + curZ.toFixed(1) + "x! Processing...";
+    sendMsg("streamlit:setComponentValue", { value: canvas.toDataURL("image/jpeg", 0.92) });
+  });
+  window.addEventListener("message", function (event) { if (event.data && event.data.type === "streamlit:render") { setHeight(); } });
+  window.addEventListener("pagehide", stopCamera);
+  window.addEventListener("beforeunload", stopCamera);
+  sendMsg("streamlit:componentReady", { apiVersion: 1 });
+  startCamera();
+})();
+</script>
+</body>
+</html>"""
+
+
+def _init_zoom_camera_component():
+    import tempfile
+    for base_dir in (Path(__file__).parent / "components" / "zoom_camera", Path(tempfile.gettempdir()) / "cipher_zoom_camera"):
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+            idx = base_dir / "index.html"
+            if not idx.exists() or idx.read_text(encoding="utf-8") != _ZOOM_CAM_HTML:
+                idx.write_text(_ZOOM_CAM_HTML, encoding="utf-8")
+            return components.declare_component("zoom_camera", path=str(base_dir))
+        except Exception:
+            continue
+    return None
+
+
+_zoom_camera_component = _init_zoom_camera_component()
 
 
 def zoom_camera_input(key: str) -> bytes | None:
@@ -1725,12 +1853,13 @@ def render_card_scanner(
 
                     if use_rear_cam:
                         st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                        sv_ = st.session_state.get(scan_ver_key, 0)
                         if cam_side == "1. Snap Front":
-                            cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}")
+                            cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}_{sv_}")
                             if cam_f is not None:
                                 st.session_state[front_store_key] = cam_f.getvalue()
                         else:
-                            cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}")
+                            cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}_{sv_}")
                             if cam_b is not None:
                                 st.session_state[back_store_key] = cam_b.getvalue()
                     else:
