@@ -7,6 +7,7 @@ import time
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ---------------------------------------------------------------------------
 # Page Configuration
@@ -287,6 +288,30 @@ LOGO_PATH = (
     if (Path(__file__).parent / "logo.png").exists()
     else Path(__file__).parent / "assets" / "logo.png"
 )
+
+_ZOOM_CAM_DIR = Path(__file__).parent / "components" / "zoom_camera"
+_zoom_camera_component = (
+    components.declare_component("zoom_camera", path=str(_ZOOM_CAM_DIR))
+    if (_ZOOM_CAM_DIR / "index.html").exists()
+    else None
+)
+
+
+def zoom_camera_input(key: str) -> bytes | None:
+    """Render the pinch-to-zoom rear camera component and return JPEG bytes when snapped."""
+    if _zoom_camera_component is None:
+        return None
+    data_url = _zoom_camera_component(key=key, default=None)
+    if not data_url or not isinstance(data_url, str) or "," not in data_url:
+        return None
+    last_key = f"_last_zcam_{key}"
+    if st.session_state.get(last_key) == data_url:
+        return None
+    st.session_state[last_key] = data_url
+    try:
+        return base64.b64decode(data_url.split(",", 1)[1])
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # Sandbox 30-Day Settled Sales Data (Panini Prizm True Silver Autos)
@@ -1131,6 +1156,41 @@ if "psa_ship_ins" not in st.session_state:
     st.session_state.psa_ship_ins = 7.01
 if "psa_custom_base" not in st.session_state:
     st.session_state.psa_custom_base = 39.99
+if "heist_watchlist_rows" not in st.session_state:
+    st.session_state.heist_watchlist_rows = [
+        {
+            "id": 1,
+            "enabled": True,
+            "query": "2023 Prizm Bijan Robinson Silver 305",
+            "auto": "Non-Auto Only",
+            "grades": "All",
+            "buy_type": "All",
+        }
+    ]
+if "heist_next_row_id" not in st.session_state:
+    st.session_state.heist_next_row_id = 2
+
+
+def _add_watchlist_row() -> None:
+    if len(st.session_state.heist_watchlist_rows) < 8:
+        rid = int(st.session_state.heist_next_row_id)
+        st.session_state.heist_next_row_id = rid + 1
+        st.session_state.heist_watchlist_rows.append(
+            {
+                "id": rid,
+                "enabled": True,
+                "query": "",
+                "auto": "Non-Auto Only",
+                "grades": "All",
+                "buy_type": "All",
+            }
+        )
+
+
+def _remove_watchlist_row(rid: int) -> None:
+    rows = st.session_state.heist_watchlist_rows
+    if len(rows) > 1:
+        st.session_state.heist_watchlist_rows = [r for r in rows if r["id"] != rid]
 
 
 def _on_grading_company_change() -> None:
@@ -1638,39 +1698,50 @@ def render_card_scanner(
             if not cam_on:
                 st.caption("Camera is **OFF**. Flip **📸 Start Rear Camera** on when you're ready to snap.")
             else:
-                try:
-                    from streamlit_back_camera_input import back_camera_input
-
-                    use_rear_cam = True
-                except ImportError:
-                    back_camera_input = None
-                    use_rear_cam = False
-
                 cam_side = st.radio(
                     "Which Side? (Uses 1 camera at a time so Front & Back never conflict)",
                     ["1. Snap Front", "2. Snap Back (Optional)"],
                     horizontal=True,
                     key=f"cam_side_{target_query_key}",
                 )
-                if use_rear_cam:
-                    st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                if _zoom_camera_component is not None:
+                    st.caption("📸 **Pinch screen or use 1x–5x slider to zoom, then tap Snap Photo!**")
                     if cam_side == "1. Snap Front":
-                        cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}")
-                        if cam_f is not None:
-                            st.session_state[front_store_key] = cam_f.getvalue()
+                        cam_f_bytes = zoom_camera_input(key=f"zcam_f_{target_query_key}_{st.session_state.get(scan_ver_key, 0)}")
+                        if cam_f_bytes is not None:
+                            st.session_state[front_store_key] = cam_f_bytes
                     else:
-                        cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}")
-                        if cam_b is not None:
-                            st.session_state[back_store_key] = cam_b.getvalue()
+                        cam_b_bytes = zoom_camera_input(key=f"zcam_b_{target_query_key}_{st.session_state.get(scan_ver_key, 0)}")
+                        if cam_b_bytes is not None:
+                            st.session_state[back_store_key] = cam_b_bytes
                 else:
-                    if cam_side == "1. Snap Front":
-                        cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
-                        if cam_f is not None:
-                            st.session_state[front_store_key] = cam_f.getvalue()
+                    try:
+                        from streamlit_back_camera_input import back_camera_input
+
+                        use_rear_cam = True
+                    except ImportError:
+                        back_camera_input = None
+                        use_rear_cam = False
+
+                    if use_rear_cam:
+                        st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                        if cam_side == "1. Snap Front":
+                            cam_f = back_camera_input(height=420, width=360, key=f"rcam_f_{target_query_key}")
+                            if cam_f is not None:
+                                st.session_state[front_store_key] = cam_f.getvalue()
+                        else:
+                            cam_b = back_camera_input(height=420, width=360, key=f"rcam_b_{target_query_key}")
+                            if cam_b is not None:
+                                st.session_state[back_store_key] = cam_b.getvalue()
                     else:
-                        cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
-                        if cam_b is not None:
-                            st.session_state[back_store_key] = cam_b.getvalue()
+                        if cam_side == "1. Snap Front":
+                            cam_f = st.camera_input("Snap Front of Card (or Slab Label)", key=f"cam_f_{target_query_key}")
+                            if cam_f is not None:
+                                st.session_state[front_store_key] = cam_f.getvalue()
+                        else:
+                            cam_b = st.camera_input("Snap Back of Card (for Card #)", key=f"cam_b_{target_query_key}")
+                            if cam_b is not None:
+                                st.session_state[back_store_key] = cam_b.getvalue()
 
         front_bytes = st.session_state.get(front_store_key)
         back_bytes = st.session_state.get(back_store_key)
@@ -2361,17 +2432,23 @@ if centering_open:
         if not ctr_cam_on:
             st.caption("Camera is **OFF**. Flip **📸 Start Rear Camera** on when you're ready to snap.")
         else:
-            try:
-                from streamlit_back_camera_input import back_camera_input
+            if _zoom_camera_component is not None:
+                st.caption("📸 **Pinch screen or use 1x–5x slider to zoom, then tap Snap Photo!**")
+                c_snap_bytes = zoom_camera_input(key=f"center_zcam_{ctr_v}")
+                if c_snap_bytes is not None:
+                    st.session_state["centering_img_bytes"] = c_snap_bytes
+            else:
+                try:
+                    from streamlit_back_camera_input import back_camera_input
 
-                st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
-                c_snap = back_camera_input(height=420, width=360, key=f"center_rcam_{ctr_v}")
-                if c_snap is not None:
-                    st.session_state["centering_img_bytes"] = c_snap.getvalue()
-            except ImportError:
-                c_snap = st.camera_input("Snap Straight-On Card Photo", key=f"center_wcam_{ctr_v}")
-                if c_snap is not None:
-                    st.session_state["centering_img_bytes"] = c_snap.getvalue()
+                    st.caption("📸 **Tap anywhere on the rear-camera preview below to snap the photo!**")
+                    c_snap = back_camera_input(height=420, width=360, key=f"center_rcam_{ctr_v}")
+                    if c_snap is not None:
+                        st.session_state["centering_img_bytes"] = c_snap.getvalue()
+                except ImportError:
+                    c_snap = st.camera_input("Snap Straight-On Card Photo", key=f"center_wcam_{ctr_v}")
+                    if c_snap is not None:
+                        st.session_state["centering_img_bytes"] = c_snap.getvalue()
     else:
         c_up = st.file_uploader("Upload Card Photo", type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"center_up_{ctr_v}")
         if c_up is not None:
@@ -2742,27 +2819,55 @@ elif data_mode == "Deal Finder":
         unsafe_allow_html=True,
     )
     st.caption(
-        "Enter your watchlist (one search per line, max 8) and click Search to pull live eBay listings (0 CompSniper tokens). "
-        "Then configure Heist Controls below and click Perform Heist to pull 30-day comps and filter to deals."
+        "Add up to 8 watchlist cards below with their own Active toggle and filters, then click Search to pull live eBay listings (0 CompSniper tokens). "
+        "Configure Heist Controls below and click Perform Heist to pull 30-day comps and filter to deals."
     )
 
-    watchlist_text = st.text_area(
-        "Watchlist (one search per line)",
-        value="2023 Prizm Bijan Robinson Silver 305",
-        height=120,
-        key="df_watchlist",
-    )
-    dfc1, dfc2, dfc3 = st.columns(3)
-    with dfc1:
-        df_auto = st.selectbox("Autograph Filter", ["Non-Auto Only", "Autographs Only", "All"], key="df_auto")
-    with dfc2:
-        df_grades = st.selectbox("Grades", ["All", "Raw only", "Slabs only"], key="df_grades")
-    with dfc3:
-        df_type = st.selectbox("Listing Type", ["All", "Buy It Now only", "Auction only"], key="df_type")
-    dc1, dc2 = st.columns(2)
-    with dc1:
+    wl_rows = st.session_state.heist_watchlist_rows
+    for idx_, row in enumerate(wl_rows):
+        rid = row["id"]
+        wc0, wc1, wc2, wc3, wc4, wc5 = st.columns([0.45, 2.5, 1.3, 1.1, 1.25, 0.45])
+        with wc0:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            row["enabled"] = st.checkbox("On", value=row["enabled"], key=f"wl_en_{rid}", label_visibility="collapsed", help="Toggle this card ON/OFF for Search & Heist")
+        with wc1:
+            row["query"] = st.text_input(
+                f"Card #{idx_ + 1}" if idx_ == 0 else f"Card #{idx_ + 1}",
+                value=row["query"],
+                placeholder="e.g. 2023 Prizm Bijan Robinson Silver 305",
+                key=f"wl_q_{rid}",
+            )
+        with wc2:
+            auto_opts = ["Non-Auto Only", "Autographs Only", "All"]
+            row["auto"] = st.selectbox("Autograph", auto_opts, index=auto_opts.index(row["auto"]), key=f"wl_auto_{rid}")
+        with wc3:
+            grade_opts = ["All", "Raw only", "Slabs only"]
+            row["grades"] = st.selectbox("Grades", grade_opts, index=grade_opts.index(row["grades"]), key=f"wl_gr_{rid}")
+        with wc4:
+            type_opts = ["All", "Buy It Now only", "Auction only"]
+            row["buy_type"] = st.selectbox("Listing Type", type_opts, index=type_opts.index(row["buy_type"]), key=f"wl_type_{rid}")
+        with wc5:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            st.button(
+                "✕",
+                key=f"wl_rm_{rid}",
+                on_click=_remove_watchlist_row,
+                args=(rid,),
+                disabled=len(wl_rows) <= 1,
+                help="Remove this card slot",
+            )
+
+    ac1, ac2, ac3 = st.columns([1.2, 2.0, 2.0])
+    with ac1:
+        st.button(
+            f"➕ Add Card ({len(wl_rows)}/8)",
+            on_click=_add_watchlist_row,
+            disabled=len(wl_rows) >= 8,
+            use_container_width=True,
+        )
+    with ac2:
         df_excl = st.checkbox("Block Inserts, Variations & Other Sets", value=True, key="df_excl")
-    with dc2:
+    with ac3:
         df_auctions = st.checkbox(
             "Include Graded Auctions (Goldin, Fanatics, MySlabs)",
             value=True,
@@ -2771,36 +2876,52 @@ elif data_mode == "Deal Finder":
         )
 
     if st.button("Search", type="primary"):
-        queries = [q.strip() for q in watchlist_text.splitlines() if q.strip()][:8]
+        active_rows = [r for r in st.session_state.heist_watchlist_rows if r["enabled"] and r["query"].strip()][:8]
         all_listings: dict[str, list[dict]] = {}
+        configs_map: dict[str, dict] = {}
         scan_errors: list[str] = []
-        prog = st.progress(0.0, text="Searching eBay...")
-        for i_, q_ in enumerate(queries):
-            prog.progress(i_ / max(len(queries), 1), text=f"Searching eBay: {q_}")
-            el = fetch_ebay_active_listings(
-                q_, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), "Price + Shipping: Lowest First", df_type
-            )
-            if el["ok"]:
-                filtered_ = [
-                    l for l in el["records"] if title_passes_filters(l["Title"], q_, df_excl, df_auto)
-                ]
-                all_listings[q_] = filtered_
-            else:
-                all_listings[q_] = []
-                scan_errors.append(f"{q_}: {el['error']}")
-        prog.empty()
-        st.session_state["deal_finder_listings"] = all_listings
-        st.session_state["deal_finder_sales"] = {}
-        st.session_state["deal_finder_errors"] = scan_errors
-        st.session_state["heist_active"] = False
+        if not active_rows:
+            st.warning("Turn ON at least one card with a search term above.")
+        else:
+            prog = st.progress(0.0, text="Searching eBay...")
+            for i_, r_ in enumerate(active_rows):
+                q_ = r_["query"].strip()
+                prog.progress(i_ / max(len(active_rows), 1), text=f"Searching eBay: {q_}")
+                configs_map[q_] = {"auto": r_["auto"], "grades": r_["grades"], "buy_type": r_["buy_type"]}
+                el = fetch_ebay_active_listings(
+                    q_, get_secret_key("EBAY_APP_ID"), get_secret_key("EBAY_CERT_ID"), "Price + Shipping: Lowest First", r_["buy_type"]
+                )
+                if el["ok"]:
+                    filtered_ = [
+                        l for l in el["records"] if title_passes_filters(l["Title"], q_, df_excl, r_["auto"])
+                    ]
+                    all_listings[q_] = filtered_
+                else:
+                    all_listings[q_] = []
+                    scan_errors.append(f"{q_}: {el['error']}")
+            prog.empty()
+            st.session_state["deal_finder_listings"] = all_listings
+            st.session_state["deal_finder_configs"] = configs_map
+            st.session_state["deal_finder_sales"] = {}
+            st.session_state["deal_finder_errors"] = scan_errors
+            st.session_state["heist_active"] = False
 
     if "deal_finder_listings" in st.session_state:
         for e_ in st.session_state.get("deal_finder_errors", []):
             st.error(e_)
 
         listings_map = st.session_state.get("deal_finder_listings", {})
+        configs_map = st.session_state.get("deal_finder_configs", {})
         sales_map = st.session_state.get("deal_finder_sales", {})
         heist_active = bool(st.session_state.get("heist_active", False))
+
+        def _passes_row_grade(q_: str, cond_: str) -> bool:
+            gf = configs_map.get(q_, {}).get("grades", "All")
+            if gf == "Raw only":
+                return cond_ == "Raw"
+            if gf == "Slabs only":
+                return cond_ != "Raw"
+            return True
 
         st.markdown(
             brand_heading(ICON_PATH_B, "Heist Results" if heist_active else "eBay Search Results", size_rem=1.22, icon_px=30),
@@ -2812,6 +2933,8 @@ elif data_mode == "Deal Finder":
             for q_, l_list in listings_map.items():
                 for l in l_list:
                     cond = classify_sale_condition({"title": l["Title"]})
+                    if not _passes_row_grade(q_, cond):
+                        continue
                     total = l["Price ($)"] + (l["Ship ($)"] or 0.0)
                     raw_rows.append(
                         {
@@ -2827,29 +2950,19 @@ elif data_mode == "Deal Finder":
                         }
                     )
             if raw_rows:
-                df_raw = pd.DataFrame(raw_rows)
-                if df_grades == "Raw only":
-                    df_raw = df_raw[df_raw["Grade"] == "Raw"]
-                elif df_grades == "Slabs only":
-                    df_raw = df_raw[df_raw["Grade"] != "Raw"]
-                df_raw = df_raw.sort_values("All-In ($)", ascending=True, na_position="last")
+                df_raw = pd.DataFrame(raw_rows).sort_values("All-In ($)", ascending=True, na_position="last")
                 st.caption(f"{len(df_raw)} active eBay listings found. Set Heist Controls below and click Perform Heist to filter to deals.")
-                if df_raw.empty:
-                    st.info("No listings matched your Grade filter.")
-                else:
-                    st.dataframe(df_raw, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
+                st.dataframe(df_raw, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
             else:
-                st.info("No active eBay listings found for that watchlist.")
+                st.info("No active eBay listings found for the enabled cards/filters.")
         else:
             scored_rows: list[dict] = []
             for q_, l_list in listings_map.items():
-                scored_rows.extend(score_deal_rows(l_list, sales_map.get(q_, {}), q_))
+                for row_s in score_deal_rows(l_list, sales_map.get(q_, {}), q_):
+                    if _passes_row_grade(q_, row_s["Grade"]):
+                        scored_rows.append(row_s)
             if scored_rows:
                 dfinder = pd.DataFrame(scored_rows)
-                if df_grades == "Raw only":
-                    dfinder = dfinder[dfinder["Grade"] == "Raw"]
-                elif df_grades == "Slabs only":
-                    dfinder = dfinder[dfinder["Grade"] != "Raw"]
                 total_before_heist = len(dfinder)
                 deal_count = int(dfinder["Verdict"].str.startswith(("✅", "🎯")).sum()) if total_before_heist else 0
                 hide_over = st.checkbox("Hide over-ceiling listings", value=True, key="df_hide_over")
@@ -2862,7 +2975,7 @@ elif data_mode == "Deal Finder":
                 else:
                     st.dataframe(dfinder, width="stretch", hide_index=True, column_config=DEAL_TABLE_CONFIG)
             else:
-                st.info("No active eBay listings found for that watchlist.")
+                st.info("No active eBay listings found for the enabled cards/filters.")
 
         st.markdown(
             brand_heading(ICON_PATH_C, "Heist Controls", size_rem=1.18, icon_px=28),
@@ -2980,7 +3093,8 @@ elif data_mode == "Deal Finder":
                     prog_h = st.progress(0.0, text="Pulling 30-day comps...")
                     for i_, q_ in enumerate(to_fetch):
                         prog_h.progress(i_ / max(len(to_fetch), 1), text=f"Pulling comps: {q_}")
-                        recs, errs = gather_merged_comps(q_, cs_key, tca_key, df_excl, df_auto, True, df_auctions)
+                        q_auto = configs_map.get(q_, {}).get("auto", "Non-Auto Only")
+                        recs, errs = gather_merged_comps(q_, cs_key, tca_key, df_excl, q_auto, True, df_auctions)
                         q_sales: dict[str, list[float]] = {}
                         for r in recs:
                             if r.get("Include", True):
